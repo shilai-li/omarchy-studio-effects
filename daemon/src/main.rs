@@ -198,6 +198,7 @@ fn main() -> Result<()> {
 
     let (w, h) = (args.width as usize, args.height as usize);
     let mut scratch = vec![0u8; w * h];
+    let mut upscaler = nv12::MaskUpscaler::new(w);
     let mut timings = Timings::default();
     let mut frame_no = 0u32;
 
@@ -240,8 +241,9 @@ fn main() -> Result<()> {
             timings.blur += t.elapsed().as_secs_f64() * 1e3;
 
             let t = Instant::now();
-            nv12::blend_luma(y_in, y_out, mask, w, h, y_stride);
-            nv12::blend_chroma(uv_in, uv_out, mask, w / 2, h / 2, uv_stride);
+            upscaler.prepare(mask);
+            nv12::blend_luma(y_in, y_out, &upscaler, w, h, y_stride);
+            nv12::blend_chroma(uv_in, uv_out, &upscaler, w / 2, h / 2, uv_stride);
             timings.blend += t.elapsed().as_secs_f64() * 1e3;
         }
 

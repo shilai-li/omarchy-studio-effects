@@ -132,34 +132,53 @@ Two honesty notes on that table, because both are easy to get wrong:
 
 | resolution | prep | infer | blur | blend | total | of 33 ms |
 |---|---|---|---|---|---|---|
-| 1280x720 | 0.24 | 0.76 | 6.41 | 7.34 | **14.74 ms** | 44% |
-| 1920x1080 | 0.26 | 0.76 | 15.15 | 17.11 | **33.28 ms** | **100%** |
+| 1280x720 | 0.24 | 0.72 | 2.38 | 1.94 | **5.28 ms** | 16% |
+| 1920x1080 | 0.20 | 0.85 | 4.07 | 1.94 | **7.06 ms** | 21% |
 
-720p at 30 fps has room to spare. **1080p does not fit** -- it lands exactly on
-the budget, which in practice means dropped frames. 720p is therefore the
-default, and 1080p is a performance job, not a flag someone can just pass.
+1080p30 fits with room to spare. It did not at first -- the first working
+version landed on 33.28 ms, exactly the budget -- and the 4.7x that closed the
+gap came entirely from how the pixels are walked, not from the model or the
+device:
 
-Two things this table settles:
+| | before | after | what changed |
+|---|---|---|---|
+| blend @1080p | 17.11 ms | 1.94 ms | separable integer mask upscale |
+| blur @1080p | 15.15 ms | 4.07 ms | reciprocal multiply, row-major vertical pass |
 
-- **Converting only what the model needs works.** `prep` turns a 1280x720 NV12
-  frame into the model's 256x256 RGB input in 0.24 ms. The equivalent GStreamer
-  convert-and-scale measured 4.22 ms. Converting 65k pixels instead of 2M is
-  where that 18x came from, and it is why nothing in the daemon ever
-  materialises an RGB frame.
-- **Inference is now 2% of the frame.** At 1080p the model costs 0.76 ms while
-  blur and blend cost 32 ms between them. Choosing a device barely moves the
-  total -- NPU 14.74, CPU 16.27, GPU 16.77 at 720p -- because the device only
-  ever had 1 ms to win. The device still matters, but for the CPU it frees, not
-  the time it saves.
+**Blend.** The mask arrives at 256x256 and the frame is 2M pixels, so the naive
+version sampled it bilinearly per pixel: four float loads and half a dozen float
+ops, two million times. Separating the axes moves that work off the per-pixel
+path -- one horizontal pass over 256 rows (491k operations), then two byte loads
+and an integer lerp per pixel.
 
-The next optimisation is therefore blur and blend, and both are wide open: they
-are scalar single-threaded loops over 2M pixels. Three obvious moves, cheapest
-first -- blur the background at quarter resolution and upscale (a blurred
-background has no detail worth carrying at full res, so this is ~16x less work
-for no visible change), hoist the mask's bilinear sample out of the per-pixel
-path, and thread the row loops. None of these need a faster model.
+**Blur.** Two ordinary-looking lines were most of the cost. The window average
+was an integer divide, four million times, by a divisor that never changes; it
+is a reciprocal multiply now. And the vertical pass walked a column at a time,
+which is how a separable blur reads naturally and touches one byte from each of
+`h` cache lines. Carrying a running sum per column turns it into sequential row
+scans.
 
-There is also real quality headroom: 256x256 MediaPipe is the cheap end of the
+None of this touched the model, and neither should the next round: at 1080p the
+model is 0.85 ms of 7.06.
+
+### Both hot loops have reference tests
+
+`cargo test` checks the fast paths against slow obvious ones -- a float bilinear
+sampler for the upscaler, a naive nested-loop box blur for the blur. They exist
+because these two functions were rewritten for speed after being verified only
+by looking at a webcam, and a webcam cannot tell you about a bias of one level.
+
+It caught one immediately. `(1 << 24) / 11` truncates, so a flat plane of 200
+blurred to 199: every still background darkened by a level the moment effects
+came on, uniformly enough that no one would see it and call it a bug. Both
+roundings in `box_blur` are load-bearing for that reason.
+
+Note that a snapshot showing everything blurred is usually not a fault. The
+model wants a person filling a reasonable part of the frame; with the subject
+small or far the mask is legitimately near-empty and the whole frame blurs. Reach
+for the tests before the pipeline.
+
+There is also real quality headroomThere is also real quality headroom: 256x256 MediaPipe is the cheap end of the
 model range, and the budget would carry something much better. Do not spend it
 on a bigger model until the composite is off the CPU.
 
@@ -202,9 +221,13 @@ a stale edge for one frame is invisible, a stutter is not.
 ## Dev workflow
 
 ```bash
-python3 tools/convert.py            # ONNX → static FP16 IR in models/
-python3 tools/bench.py              # per-device latency, re-run after model changes
-python3 tools/load.py               # per-device CPU cost at a real 30 fps cadence
+# Use /usr/bin/python3 explicitly: a version manager (mise) shims a python3
+# on PATH that has no openvino, and the import error looks like a missing package.
+/usr/bin/python3 tools/convert.py   # ONNX → static FP16 IR in models/
+/usr/bin/python3 tools/bench.py     # per-device latency, re-run after model changes
+/usr/bin/python3 tools/load.py      # per-device CPU cost at a real 30 fps cadence
+
+cd daemon && cargo test             # reference tests for the two hot loops
 
 omarchy plugin validate .           # manifest + entry points
 ```
