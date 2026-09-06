@@ -38,7 +38,11 @@ looks like a working one with no effects.
 ## Layout
 
 ```
-manifest.json            plugin manifest; the bar widget is not written yet
+manifest.json            plugin manifest; barWidget.schema is empty, deliberately
+BarWidget.qml            the bar glyph; owns the daemon conversation
+Panel.qml                the effect list, a read-out of the widget
+Model.js                 pure logic: commands, reply parsing, glyphs
+test/model-test.sh       unit tests for Model.js -- plain node, no compositor
 models/*.onnx            model source. The IR beside it is built, not committed
 tools/convert.py         ONNX -> static FP16 IR
 tools/bench.py           per-device inference latency
@@ -244,6 +248,16 @@ anywhere. Measured both ways: with access `npu_busy_time_us` climbed 54463 us
 over nine seconds; without it, zero, and the daemon announced its fallback
 exactly as designed.
 
+**The widget owns no settings, and that is the point.** The daemon holds the
+effect and the blur radius and answers every command with its whole state, so
+there is one copy of the truth and the widget only ever shows it.
+`manifest.json`'s `barWidget.schema` is empty for that reason -- it once
+declared `effect` and `blurStrength`, written before the daemon existed, and
+keeping them would have given the widget a second opinion that goes stale the
+moment the CLI, a keybinding or another monitor changes anything. The usual rule
+about mirroring a setting in three places does not apply to state that belongs
+to something else.
+
 **Settings change over a socket, never by restarting.** Restarting the service
 to change an effect drops the camera for a second, which on a live call is a
 black frame everyone sees. `control.rs` listens on a unix socket in
@@ -335,3 +349,8 @@ for that reason; don't re-add it as "the original".
 5. Never enable effects on a camera the user did not point the daemon at, and
    never leave the loopback holding a frame after the daemon exits — a frozen
    last frame on a live call is worse than no device.
+6. Before declaring the widget done: `omarchy plugin validate` clean, qmllint
+   *categories* matching `omarchy-recent-paths` (not counts — the shipped
+   built-ins emit the same noise outside Quickshell), `bash test/model-test.sh`
+   green, and the panel actually opened and looked at. All four have caught
+   something the others did not.

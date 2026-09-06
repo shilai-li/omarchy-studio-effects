@@ -3,10 +3,9 @@
 Camera background blur and replacement for [Omarchy](https://omarchy.org), with
 the segmentation run on your laptop's NPU.
 
-> **Early development.** The daemon works and is packaged: it segments a live
-> camera and publishes the result as a second camera your apps can select, at
-> 1080p30, with the background blurred or replaced. The bar widget is not
-> written yet, so changing effects means editing a config file and restarting.
+> **Early development,** but complete end to end: a daemon that segments your
+> camera and publishes the result as a second camera, and a bar widget to
+> control it.
 
 The point is not speed. Segmentation costs well under a millisecond against a
 33 ms frame budget, so it would run fine on the CPU. The point is what holding
@@ -67,6 +66,29 @@ It is cropped to your camera's aspect and scaled to fill, so a wallpaper does
 not arrive letterboxed. `EFFECT=none` passes the camera through untouched while
 keeping the output device alive, so apps do not lose their selection when you
 turn effects off.
+
+## The bar widget
+
+```bash
+omarchy plugin add https://github.com/shilai-li/omarchy-studio-effects.git --enable
+```
+
+A glyph on the right of the bar shows what the camera is doing — off, blurred,
+or replaced — and clicking it opens the list.
+
+| Key | |
+|---|---|
+| `↑` `↓` (or `k` `j`) | move |
+| `enter` / `space` | choose that effect |
+| `←` `→` (or `h` `l`) | more or less blur |
+| `f` | turn effects off, or back on |
+| `r` | re-read the daemon |
+| `esc` | close |
+
+**Replace background** only appears when the daemon actually has an image
+loaded, because offering a choice it would refuse is worse than not offering it.
+If the daemon is not running the panel says so, and says which command starts
+it.
 
 ## Changing things without restarting
 
