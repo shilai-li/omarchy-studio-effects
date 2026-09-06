@@ -1,0 +1,45 @@
+{
+  "schemaVersion": 1,
+  "id": "shilai_li.studio-effects",
+  "name": "Studio Effects",
+  "version": "0.1.0",
+  "author": "Shilai Li",
+  "license": "MIT",
+  "description": "Background blur and replacement for your camera, segmented on the NPU. Control surface for studio-effects-daemon.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Studio Effects",
+    "description": "Camera background effects, run on the NPU",
+    "category": "Hardware",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "effect": "blur",
+      "blurStrength": 60
+    },
+    "schema": [
+      {
+        "key": "effect",
+        "type": "string",
+        "label": "Effect",
+        "description": "What the daemon applies to the background when effects are on.",
+        "defaultValue": "blur",
+        "options": ["none", "blur", "replace"]
+      },
+      {
+        "key": "blurStrength",
+        "type": "number",
+        "label": "Blur strength",
+        "description": "How hard the background is blurred, as a percentage.",
+        "defaultValue": 60,
+        "min": 10,
+        "max": 100
+      }
+    ]
+  }
+}

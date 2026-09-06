@@ -1,0 +1,14 @@
+# The IR pair is generated from the committed .onnx by tools/convert.py, so it
+# is built, not source. Everything else here is source — this file exists so a
+# stray editor swap never lands in a plugin someone else installs.
+/target/
+/models/*.xml
+/models/*.bin
+
+# MediaPipe's own .tflite is a dead end, not an original: it carries a custom op
+# OpenVINO's tflite frontend cannot translate. See AGENTS.md.
+/models/*.tflite
+
+*~
+.*.sw?
+node_modules/
