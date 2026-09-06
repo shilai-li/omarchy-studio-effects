@@ -178,6 +178,19 @@ a user is not in `render` by default. The failure is silent: OpenVINO reports
 `available_devices` without `NPU` rather than raising a permission error, so the
 daemon must say "no NPU, using GPU" out loud instead of quietly degrading.
 
+**The shipped unit must set `SupplementaryGroups=render`.** Telling a user to
+join `render` is not enough and the reason is worth knowing, because it looks
+exactly like a bug in the device selection. Supplementary groups are fixed when
+a process is created, so joining the group only reaches processes started after
+it -- and on Omarchy every terminal descends from the long-lived `systemd --user`
+manager, which is not restarted by logging out (`Linger=no` only stops it once
+*every* session closes) and does not refresh its credentials on
+`daemon-reexec`. A user can therefore join `render`, log out, log back in, and
+still have no NPU in any terminal until a reboot. Verified: with the group,
+`npu_busy_time_us` climbed 54463 us over nine seconds; without it, zero, and the
+daemon fell back to the GPU exactly as designed. A service that declares the
+group itself never depends on any of this.
+
 **The daemon owns the loopback, the widget owns nothing.** All state lives in
 the daemon; the widget reads and commands it over IPC. A bar surface exists per
 monitor, so anything the widget owned is state two monitors could disagree about.
