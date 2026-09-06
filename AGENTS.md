@@ -126,6 +126,39 @@ Two honesty notes on that table, because both are easy to get wrong:
   NPU's advantage from 7x to 35x. Never benchmark the CPU plugin at defaults for
   a fixed-cadence workload; pass `INFERENCE_NUM_THREADS: 1` as `load.py` does.
 
+### What the daemon actually costs
+
+`studio-effects-daemon`, per frame, USB camera, NPU, blur radius 12:
+
+| resolution | prep | infer | blur | blend | total | of 33 ms |
+|---|---|---|---|---|---|---|
+| 1280x720 | 0.24 | 0.76 | 6.41 | 7.34 | **14.74 ms** | 44% |
+| 1920x1080 | 0.26 | 0.76 | 15.15 | 17.11 | **33.28 ms** | **100%** |
+
+720p at 30 fps has room to spare. **1080p does not fit** -- it lands exactly on
+the budget, which in practice means dropped frames. 720p is therefore the
+default, and 1080p is a performance job, not a flag someone can just pass.
+
+Two things this table settles:
+
+- **Converting only what the model needs works.** `prep` turns a 1280x720 NV12
+  frame into the model's 256x256 RGB input in 0.24 ms. The equivalent GStreamer
+  convert-and-scale measured 4.22 ms. Converting 65k pixels instead of 2M is
+  where that 18x came from, and it is why nothing in the daemon ever
+  materialises an RGB frame.
+- **Inference is now 2% of the frame.** At 1080p the model costs 0.76 ms while
+  blur and blend cost 32 ms between them. Choosing a device barely moves the
+  total -- NPU 14.74, CPU 16.27, GPU 16.77 at 720p -- because the device only
+  ever had 1 ms to win. The device still matters, but for the CPU it frees, not
+  the time it saves.
+
+The next optimisation is therefore blur and blend, and both are wide open: they
+are scalar single-threaded loops over 2M pixels. Three obvious moves, cheapest
+first -- blur the background at quarter resolution and upscale (a blurred
+background has no detail worth carrying at full res, so this is ~16x less work
+for no visible change), hoist the mask's bilinear sample out of the per-pixel
+path, and thread the row loops. None of these need a faster model.
+
 There is also real quality headroom: 256x256 MediaPipe is the cheap end of the
 model range, and the budget would carry something much better. Do not spend it
 on a bigger model until the composite is off the CPU.

@@ -1,7 +1,7 @@
 # The IR pair is generated from the committed .onnx by tools/convert.py, so it
 # is built, not source. Everything else here is source — this file exists so a
 # stray editor swap never lands in a plugin someone else installs.
-/target/
+target/
 /models/*.xml
 /models/*.bin
 
