@@ -1,0 +1,42 @@
+# The daemon itself, as a user service.
+#
+# A user unit, not a system one: it reads the user's camera and follows their
+# session, and there is nothing here that wants root. Note that this means
+# SupplementaryGroups= is unavailable -- the user manager has no privilege to
+# change credentials -- so NPU access rests on the permissions of
+# /dev/accel/accel0 rather than on this unit. See AGENTS.md; if the daemon
+# reports falling back to the GPU, that is what to look at.
+
+[Unit]
+Description=Studio Effects camera daemon
+Documentation=https://github.com/shilai-li/omarchy-studio-effects
+After=studio-effects-loopback.service
+
+[Service]
+Type=simple
+
+# Defaults, overridable per user without editing this file.
+Environment=INPUT=/dev/video0
+Environment=WIDTH=1280
+Environment=HEIGHT=720
+Environment=BLUR=12
+EnvironmentFile=-%h/.config/studio-effects.conf
+
+# ${VAR} rather than $VAR: a card label like "FHD Camera: FHD Camera" contains
+# spaces and must stay one argument.
+ExecStart=/usr/bin/studio-effects-daemon \
+    --input ${INPUT} \
+    --output "Studio Camera" \
+    --width ${WIDTH} \
+    --height ${HEIGHT} \
+    --blur ${BLUR} \
+    --model /usr/share/studio-effects/models/selfie_segmentation.xml \
+    --cache %C/studio-effects \
+    --stats-every 0
+
+CacheDirectory=studio-effects
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target

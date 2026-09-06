@@ -3,9 +3,9 @@
 Camera background blur and replacement for [Omarchy](https://omarchy.org), with
 the segmentation run on your laptop's NPU.
 
-> **Early development.** The daemon works -- it segments and composites a live
-> camera at 720p30 -- but it cannot publish to a camera device yet without a
-> loopback you create by hand, and the bar widget is not written. Not installable.
+> **Early development.** The daemon works and is packaged: it segments a live
+> camera and publishes the result as a second camera your apps can select, at
+> 1080p30. The bar widget is not written yet.
 
 The point is not speed. Segmentation costs well under a millisecond against a
 33 ms frame budget, so it would run fine on the CPU. The point is what holding
@@ -34,20 +34,41 @@ The daemon ships as a package; the widget installs with `omarchy plugin add`.
 They are separate because an Omarchy plugin is cloned files only — the installer
 builds nothing and runs nothing.
 
+## Install
+
+```bash
+cd packaging && makepkg -si
+sudo systemctl enable --now studio-effects-loopback   # creates "Studio Camera"
+systemctl --user enable --now studio-effects          # runs the daemon
+```
+
+Then pick **Studio Camera** in Zoom, Meet, or any browser.
+
+To point it at a different camera, or change the resolution or blur:
+
+```bash
+cp /usr/share/studio-effects/studio-effects.conf.example ~/.config/studio-effects.conf
+$EDITOR ~/.config/studio-effects.conf
+systemctl --user restart studio-effects
+```
+
+`studio-effects-daemon --list-devices` prints every camera with its card label.
+Prefer labels over `/dev/videoN` in that file: numbers move between boots.
+
 ## Requirements
 
 An Intel Core Ultra with an NPU, though it falls back to the GPU and then the
-CPU. On Arch/Omarchy:
+CPU and works fine on either. On Arch/Omarchy the NPU needs:
 
 ```bash
-sudo pacman -S openvino openvino-intel-npu-plugin openvino-intel-gpu-plugin \
-               python-openvino intel-npu-driver intel-npu-compiler
-sudo usermod -aG render $USER   # then log out and back in
+sudo pacman -S intel-npu-driver openvino-intel-npu-plugin
 ```
 
-That last line is not optional. `intel-npu-driver` ships a udev rule putting
-`/dev/accel/*` in group `render`, and without it OpenVINO reports no NPU at all
-rather than an error.
+If the daemon logs `no NPU available, falling back to GPU`, check the
+permissions on `/dev/accel/accel0`. It is world-accessible on a current Arch
+system; if yours is `0660 root render`, join that group **and reboot** -- logging
+out is not enough, because your terminals inherit their groups from a
+`systemd --user` manager that a logout does not restart.
 
 ## Development
 

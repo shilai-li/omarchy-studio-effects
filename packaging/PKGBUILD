@@ -1,0 +1,69 @@
+# Maintainer: Shilai Li <robotmaster1024@gmail.com>
+pkgname=omarchy-studio-effects
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="NPU-accelerated camera background effects for Omarchy"
+arch=('x86_64')
+url="https://github.com/shilai-li/omarchy-studio-effects"
+license=('MIT')
+
+# gst-plugins-good carries v4l2src and v4l2sink; -base carries videoconvert,
+# videoscale and appsrc/appsink; -bad carries the jpeg decoding decodebin picks
+# for a USB camera.
+depends=('openvino' 'gstreamer' 'gst-plugins-base' 'gst-plugins-good'
+         'v4l2loopback-dkms' 'v4l2loopback-utils')
+makedepends=('cargo' 'python-openvino')
+
+# The NPU is the point, but the daemon falls back to GPU and then CPU, so none
+# of these is required to have a working camera.
+optdepends=('intel-npu-driver: segmentation on the NPU'
+            'openvino-intel-npu-plugin: segmentation on the NPU'
+            'openvino-intel-gpu-plugin: segmentation on the GPU')
+
+source=("$pkgname-$pkgver.tar.gz::$url/archive/v$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+prepare() {
+  cd "$srcdir/$pkgname-$pkgver/daemon"
+  cargo fetch --locked
+}
+
+build() {
+  cd "$srcdir/$pkgname-$pkgver"
+  # The IR is generated, not committed: it is a build product of the .onnx and
+  # of whichever OpenVINO version is installed here.
+  /usr/bin/python3 tools/convert.py models/selfie_segmentation.onnx \
+                                    models/selfie_segmentation.xml
+  cd daemon
+  cargo build --release --frozen
+}
+
+check() {
+  cd "$srcdir/$pkgname-$pkgver/daemon"
+  # Covers the two hot loops against slow reference implementations. Needs no
+  # camera, no NPU and no loopback, so it runs in a clean build container.
+  cargo test --release --frozen
+}
+
+package() {
+  cd "$srcdir/$pkgname-$pkgver"
+
+  install -Dm755 daemon/target/release/studio-effects-daemon \
+                 "$pkgdir/usr/bin/studio-effects-daemon"
+
+  install -Dm644 models/selfie_segmentation.xml \
+                 "$pkgdir/usr/share/studio-effects/models/selfie_segmentation.xml"
+  install -Dm644 models/selfie_segmentation.bin \
+                 "$pkgdir/usr/share/studio-effects/models/selfie_segmentation.bin"
+
+  install -Dm644 packaging/studio-effects-loopback.service \
+                 "$pkgdir/usr/lib/systemd/system/studio-effects-loopback.service"
+  install -Dm644 packaging/studio-effects.service \
+                 "$pkgdir/usr/lib/systemd/user/studio-effects.service"
+
+  install -Dm644 packaging/studio-effects.conf.example \
+                 "$pkgdir/usr/share/studio-effects/studio-effects.conf.example"
+
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+}

@@ -1,0 +1,14 @@
+# Copy to ~/.config/studio-effects.conf and edit, then:
+#   systemctl --user restart studio-effects
+#
+# INPUT takes either a /dev/video path or a card label. Prefer the label:
+# numbers move between boots. `studio-effects-daemon --list-devices` prints both.
+INPUT=/dev/video0
+
+# 1080p fits comfortably (about 7 ms of a 33 ms frame), but most calls never
+# send more than 720p, so the default stays there.
+WIDTH=1280
+HEIGHT=720
+
+# Background blur radius, in pixels at the frame's own scale.
+BLUR=12

@@ -35,6 +35,21 @@ When the daemon is absent the widget says so, the way Recent Paths reports a
 missing zoxide — an explicit "not installed" state, never an empty panel that
 looks like a working one with no effects.
 
+## Layout
+
+```
+manifest.json            plugin manifest; the bar widget is not written yet
+models/*.onnx            model source. The IR beside it is built, not committed
+tools/convert.py         ONNX -> static FP16 IR
+tools/bench.py           per-device inference latency
+tools/load.py            per-device CPU cost at a real 30 fps cadence
+daemon/src/main.rs       CLI, GStreamer wiring, per-stage timing
+daemon/src/nv12.rs       the frame maths, and the tests that pin it
+daemon/src/segmenter.rs  device choice, model cache, one inference per frame
+daemon/src/device.rs     resolving a v4l2 device by card label
+packaging/               systemd units, PKGBUILD, example config
+```
+
 ## Ground truth — read it, don't guess
 
 | What | Path |
@@ -197,18 +212,40 @@ a user is not in `render` by default. The failure is silent: OpenVINO reports
 `available_devices` without `NPU` rather than raising a permission error, so the
 daemon must say "no NPU, using GPU" out loud instead of quietly degrading.
 
-**The shipped unit must set `SupplementaryGroups=render`.** Telling a user to
-join `render` is not enough and the reason is worth knowing, because it looks
-exactly like a bug in the device selection. Supplementary groups are fixed when
-a process is created, so joining the group only reaches processes started after
-it -- and on Omarchy every terminal descends from the long-lived `systemd --user`
-manager, which is not restarted by logging out (`Linger=no` only stops it once
-*every* session closes) and does not refresh its credentials on
-`daemon-reexec`. A user can therefore join `render`, log out, log back in, and
-still have no NPU in any terminal until a reboot. Verified: with the group,
-`npu_busy_time_us` climbed 54463 us over nine seconds; without it, zero, and the
-daemon fell back to the GPU exactly as designed. A service that declares the
-group itself never depends on any of this.
+**NPU access is a permissions question, not a group question.** An earlier note
+here said the shipped unit should set `SupplementaryGroups=render`. That was
+wrong twice over, and the correction is worth keeping because the symptom --
+"the daemon says it fell back to the GPU" -- looks exactly like a bug in device
+selection, which is the one place it is not.
+
+`SupplementaryGroups=` does not work in a **user** unit at all: changing
+credentials needs privilege the per-user systemd manager does not have. And the
+daemon is a user service by design, because it reads the user's camera and
+follows their session.
+
+What actually governs access is the mode on `/dev/accel/accel0`, and two udev
+rules disagree about it. Intel's `10-intel-npu.rules` asks for `GROUP="render",
+MODE="0660"`; systemd's `50-udev-default.rules` asks for `MODE="0666"`, sorts
+later, and wins. So on a current Arch/Omarchy system the NPU is world-accessible
+and no group is involved -- verified by running the daemon under `systemd --user`
+with no special credentials, where it reports `segmenting on NPU`.
+
+Do not lean on that either. If a system does end up at 0660, the fix is to join
+`render` **and reboot**, and the reboot is the part everyone skips. Supplementary
+groups are fixed when a process is created; every terminal descends from the
+long-lived `systemd --user` manager; logging out does not restart it (`Linger=no`
+only stops it once *every* session closes) and `daemon-reexec` does not refresh
+it. A user can join `render`, log out, log back in, and still have no NPU
+anywhere. Measured both ways: with access `npu_busy_time_us` climbed 54463 us
+over nine seconds; without it, zero, and the daemon announced its fallback
+exactly as designed.
+
+**Devices are found by card label, never by number.** A loopback takes whatever
+number is free when it is created, and that changes: the same machine with the
+same setup gave /dev/video51 one boot and /dev/video10 the next. The unit does
+not request a number, `device.rs` resolves the label, and Omarchy's own camera
+relay does the same thing for the same reason. Anything that hardcodes
+/dev/videoN works until the next reboot.
 
 **The daemon owns the loopback, the widget owns nothing.** All state lives in
 the daemon; the widget reads and commands it over IPC. A bar surface exists per

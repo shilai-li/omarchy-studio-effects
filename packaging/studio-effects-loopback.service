@@ -1,0 +1,32 @@
+# Creates the loopback device the daemon publishes to.
+#
+# This is a system unit because creating a v4l2loopback device needs root, and
+# it is separate from the daemon because the device should exist whether or not
+# anyone is running effects -- an app that has "Studio Camera" selected should
+# still find it there after a reboot.
+#
+# The device number is deliberately not specified. Asking for a fixed one fails
+# outright when something else already holds it, and the vendor camera relay
+# already occupies a number in the same pool. The daemon looks the device up by
+# card label instead, so whichever number this gets is fine.
+
+[Unit]
+Description=Create the Studio Camera loopback device
+Documentation=https://github.com/shilai-li/omarchy-studio-effects
+After=systemd-modules-load.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStartPre=/usr/bin/modprobe v4l2loopback
+# Idempotent: re-running must not stack up a second Studio Camera.
+ExecStart=/usr/bin/bash -c '\
+  grep -qFx "Studio Camera" /sys/class/video4linux/*/name 2>/dev/null && exit 0; \
+  exec /usr/bin/v4l2loopback-ctl add --name "Studio Camera" --exclusive-caps 1 --buffers 4'
+ExecStop=/usr/bin/bash -c '\
+  n=$(grep -lFx "Studio Camera" /sys/class/video4linux/*/name 2>/dev/null | head -1) || exit 0; \
+  [ -n "$n" ] || exit 0; \
+  exec /usr/bin/v4l2loopback-ctl delete "/dev/$(basename "$(dirname "$n")")"'
+
+[Install]
+WantedBy=multi-user.target

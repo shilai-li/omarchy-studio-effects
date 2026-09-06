@@ -5,6 +5,7 @@
 //! inference is under a millisecond and colour conversion is not, so the frame
 //! never leaves NV12 and only the 256x256 the model needs is ever converted.
 
+mod device;
 mod nv12;
 mod segmenter;
 
@@ -19,14 +20,19 @@ use std::time::Instant;
 #[derive(Parser)]
 #[command(about = "NPU-accelerated camera background effects", version)]
 struct Args {
-    /// Camera to read.
+    /// Camera to read: a /dev/video path, or a card label to look up.
     #[arg(short, long, default_value = "/dev/video0")]
     input: String,
 
-    /// v4l2loopback device to publish to. Omitted, frames are processed and
-    /// dropped -- which is how you measure the pipeline without a loopback.
+    /// v4l2loopback to publish to: a /dev/video path, or a card label to look
+    /// up. Omitted, frames are processed and dropped -- which is how the
+    /// pipeline gets measured without a loopback.
     #[arg(short, long)]
     output: Option<String>,
+
+    /// List every v4l2 device with its card label, then exit.
+    #[arg(long)]
+    list_devices: bool,
 
     #[arg(long, default_value_t = 1280)]
     width: u32,
@@ -51,7 +57,9 @@ struct Args {
     #[arg(long, default_value = "/tmp/studio-effects-cache")]
     cache: String,
 
-    /// Print a timing line every N frames.
+    /// Print a timing line every N frames. 0 turns timing off, which is what a
+    /// service wants -- otherwise it writes a line a second to the journal
+    /// forever.
     #[arg(long, default_value_t = 60)]
     stats_every: u64,
 
@@ -131,7 +139,18 @@ fn write_png(buffer: &gst::Buffer, info: &gst_video::VideoInfo, path: &str) -> R
 
 fn main() -> Result<()> {
     let args = Args::parse();
+
+    if args.list_devices {
+        for (dev, label) in device::list()? {
+            println!("{dev:<16} {label:?}");
+        }
+        return Ok(());
+    }
+
     gst::init().context("initialising GStreamer")?;
+
+    let input = device::resolve(&args.input)?;
+    let output = args.output.as_deref().map(device::resolve).transpose()?;
 
     let mut seg = segmenter::Segmenter::new(&args.model, &args.cache, args.device.as_deref())?;
     println!("segmenting on {}", seg.device);
@@ -142,7 +161,7 @@ fn main() -> Result<()> {
         "v4l2src device={} ! decodebin ! videoconvert ! videoscale \
          ! video/x-raw,format=NV12,width={},height={},framerate={}/1 \
          ! appsink name=sink max-buffers=2 drop=true sync=false",
-        args.input, args.width, args.height, args.fps
+        input, args.width, args.height, args.fps
     );
     let pipeline = gst::parse::launch(&src)
         .context("building the capture pipeline")?
@@ -156,8 +175,7 @@ fn main() -> Result<()> {
 
     // The output half is optional so the pipeline can be measured on a machine
     // with no spare loopback device -- creating one needs root.
-    let out = args
-        .output
+    let out = output
         .as_ref()
         .map(|dev| -> Result<(gst::Pipeline, gst_app::AppSrc)> {
             let desc = format!(
@@ -183,10 +201,10 @@ fn main() -> Result<()> {
     pipeline.set_state(gst::State::Playing)?;
     println!(
         "reading {} at {}x{}{}",
-        args.input,
+        input,
         args.width,
         args.height,
-        match &args.output {
+        match &output {
             Some(d) => format!(", writing {d}"),
             None => ", discarding output (pass --output to publish)".into(),
         }
@@ -263,7 +281,7 @@ fn main() -> Result<()> {
         }
 
         timings.frames += 1;
-        if timings.frames >= args.stats_every {
+        if args.stats_every > 0 && timings.frames >= args.stats_every {
             timings.report(&seg.device);
         }
 
