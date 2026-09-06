@@ -20,6 +20,10 @@ Environment=INPUT=/dev/video0
 Environment=WIDTH=1280
 Environment=HEIGHT=720
 Environment=BLUR=12
+Environment=EFFECT=blur
+Environment=BACKGROUND=
+Environment=MASK_GAIN=3.0
+Environment=MASK_SMOOTHING=0.5
 EnvironmentFile=-%h/.config/studio-effects.conf
 
 # ${VAR} rather than $VAR: a card label like "FHD Camera: FHD Camera" contains
@@ -30,6 +34,10 @@ ExecStart=/usr/bin/studio-effects-daemon \
     --width ${WIDTH} \
     --height ${HEIGHT} \
     --blur ${BLUR} \
+    --effect ${EFFECT} \
+    --background ${BACKGROUND} \
+    --mask-gain ${MASK_GAIN} \
+    --mask-smoothing ${MASK_SMOOTHING} \
     --model /usr/share/studio-effects/models/selfie_segmentation.xml \
     --cache %C/studio-effects \
     --stats-every 0

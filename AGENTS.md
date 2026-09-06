@@ -45,6 +45,8 @@ tools/bench.py           per-device inference latency
 tools/load.py            per-device CPU cost at a real 30 fps cadence
 daemon/src/main.rs       CLI, GStreamer wiring, per-stage timing
 daemon/src/nv12.rs       the frame maths, and the tests that pin it
+daemon/src/mask.rs       conditioning the model's output into an alpha
+daemon/src/background.rs decoding a replacement background once
 daemon/src/segmenter.rs  device choice, model cache, one inference per frame
 daemon/src/device.rs     resolving a v4l2 device by card label
 packaging/               systemd units, PKGBUILD, example config
@@ -240,6 +242,18 @@ anywhere. Measured both ways: with access `npu_busy_time_us` climbed 54463 us
 over nine seconds; without it, zero, and the daemon announced its fallback
 exactly as designed.
 
+**The model's output is a probability, not an alpha.** Using it directly is what
+made a waving hand look transparent: the camera motion-blurs it, the model is
+honestly unsure, and 0.5 composites the hand half-way into its own blurred copy.
+A viewer does not read that as uncertainty. `mask.rs` steepens the curve with a
+smoothstep so confident pixels go solid, and keeps a narrow soft band at the
+silhouette because that band is what makes hair look like hair -- a hard
+threshold fixes the ghosting and produces a cut-out instead.
+
+Temporal smoothing is deliberately mild. It steadies edges while someone sits
+still, but it is a lag: turned up, it smears the silhouette behind anyone who
+moves, which is a worse version of the problem it was added to fix.
+
 **Devices are found by card label, never by number.** A loopback takes whatever
 number is free when it is created, and that changes: the same machine with the
 same setup gave /dev/video51 one boot and /dev/video10 the next. The unit does
@@ -264,7 +278,7 @@ a stale edge for one frame is invisible, a stutter is not.
 /usr/bin/python3 tools/bench.py     # per-device latency, re-run after model changes
 /usr/bin/python3 tools/load.py      # per-device CPU cost at a real 30 fps cadence
 
-cd daemon && cargo test             # reference tests for the two hot loops
+cd daemon && cargo test             # reference tests for the hot loops and the mask
 
 omarchy plugin validate .           # manifest + entry points
 ```

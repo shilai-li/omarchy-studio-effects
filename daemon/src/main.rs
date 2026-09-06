@@ -5,12 +5,14 @@
 //! inference is under a millisecond and colour conversion is not, so the frame
 //! never leaves NV12 and only the 256x256 the model needs is ever converted.
 
+mod background;
 mod device;
+mod mask;
 mod nv12;
 mod segmenter;
 
 use anyhow::{Context, Result};
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer_app as gst_app;
@@ -47,9 +49,28 @@ struct Args {
     #[arg(long, value_parser = parse_device)]
     device: Option<String>,
 
+    /// What to do with the background.
+    #[arg(long, value_enum, default_value_t = Effect::Blur)]
+    effect: Effect,
+
+    /// Image to stand behind you when --effect replace.
+    #[arg(long)]
+    background: Option<String>,
+
     /// Background blur radius in pixels, at the frame's own scale.
     #[arg(long, default_value_t = 12)]
     blur: usize,
+
+    /// How hard to push the model's probabilities toward solid foreground or
+    /// solid background. 1 uses them as-is, which is what made moving limbs
+    /// look transparent.
+    #[arg(long, default_value_t = 3.0)]
+    mask_gain: f32,
+
+    /// Weight kept from the previous frame's mask, 0 to 0.95. Steadies edges
+    /// while you hold still; too much smears the silhouette when you move.
+    #[arg(long, default_value_t = 0.5)]
+    mask_smoothing: f32,
 
     #[arg(long, default_value = "models/selfie_segmentation.xml")]
     model: String,
@@ -67,6 +88,17 @@ struct Args {
     /// what the composite actually looks like without a loopback device.
     #[arg(long)]
     snapshot: Option<String>,
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, ValueEnum)]
+enum Effect {
+    /// Pass the camera through untouched. Still worth running, because the
+    /// output device stays alive and apps keep their selection.
+    None,
+    /// Blur the background.
+    Blur,
+    /// Replace the background with an image.
+    Replace,
 }
 
 fn parse_device(s: &str) -> Result<String, String> {
@@ -217,6 +249,22 @@ fn main() -> Result<()> {
     let (w, h) = (args.width as usize, args.height as usize);
     let mut scratch = vec![0u8; w * h];
     let mut upscaler = nv12::MaskUpscaler::new(w);
+    let mut mask_filter = mask::MaskFilter::new(args.mask_gain, args.mask_smoothing);
+    let mut mask = vec![0.0f32; nv12::NET * nv12::NET];
+
+    let backdrop = match args.effect {
+        Effect::Replace => {
+            // Empty counts as unset: the systemd unit passes --background
+            // unconditionally, because it has no way to omit an argument.
+            let path = args
+                .background
+                .as_deref()
+                .filter(|p| !p.is_empty())
+                .context("--effect replace needs --background <image>")?;
+            Some(background::Background::load(path, args.width, args.height)?)
+        }
+        _ => None,
+    };
     let mut timings = Timings::default();
     let mut frame_no = 0u32;
 
@@ -243,25 +291,35 @@ fn main() -> Result<()> {
         timings.prep += t.elapsed().as_secs_f64() * 1e3;
 
         let t = Instant::now();
-        let mask = seg.infer()?;
+        mask.copy_from_slice(seg.infer()?);
         timings.infer += t.elapsed().as_secs_f64() * 1e3;
+        mask_filter.apply(&mut mask);
 
         {
             let dst_ref = dst.get_mut().context("output buffer was not writable")?;
             let mut out_frame = gst_video::VideoFrameRef::from_buffer_ref_writable(dst_ref, &info)?;
             let [y_out, uv_out, _, _] = out_frame.planes_data_mut();
 
-            // Blur the whole copy, then paint the sharp subject back over it.
-            // Doing it this way means the blur never has to know about the mask.
+            // Build the background over the whole frame, then paint the sharp
+            // subject back on top. Doing it this way means neither the blur nor
+            // the image copy has to know anything about the mask.
             let t = Instant::now();
-            nv12::box_blur(y_out, &mut scratch, w, h, y_stride, args.blur);
-            nv12::box_blur(uv_out, &mut scratch, w, h / 2, uv_stride, args.blur / 2);
+            match (&backdrop, args.effect) {
+                (Some(bg), _) => bg.paint(y_out, uv_out, w, h, y_stride, uv_stride),
+                (None, Effect::Blur) => {
+                    nv12::box_blur(y_out, &mut scratch, w, h, y_stride, args.blur);
+                    nv12::box_blur(uv_out, &mut scratch, w, h / 2, uv_stride, args.blur / 2);
+                }
+                (None, _) => {}
+            }
             timings.blur += t.elapsed().as_secs_f64() * 1e3;
 
             let t = Instant::now();
-            upscaler.prepare(mask);
-            nv12::blend_luma(y_in, y_out, &upscaler, w, h, y_stride);
-            nv12::blend_chroma(uv_in, uv_out, &upscaler, w / 2, h / 2, uv_stride);
+            if args.effect != Effect::None {
+                upscaler.prepare(&mask);
+                nv12::blend_luma(y_in, y_out, &upscaler, w, h, y_stride);
+                nv12::blend_chroma(uv_in, uv_out, &upscaler, w / 2, h / 2, uv_stride);
+            }
             timings.blend += t.elapsed().as_secs_f64() * 1e3;
         }
 

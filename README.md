@@ -5,7 +5,8 @@ the segmentation run on your laptop's NPU.
 
 > **Early development.** The daemon works and is packaged: it segments a live
 > camera and publishes the result as a second camera your apps can select, at
-> 1080p30. The bar widget is not written yet.
+> 1080p30, with the background blurred or replaced. The bar widget is not
+> written yet, so changing effects means editing a config file and restarting.
 
 The point is not speed. Segmentation costs well under a millisecond against a
 33 ms frame budget, so it would run fine on the CPU. The point is what holding
@@ -54,6 +55,18 @@ systemctl --user restart studio-effects
 
 `studio-effects-daemon --list-devices` prints every camera with its card label.
 Prefer labels over `/dev/videoN` in that file: numbers move between boots.
+
+To put an image behind you instead of a blur:
+
+```conf
+EFFECT=replace
+BACKGROUND=/home/you/.config/omarchy/backgrounds/catppuccin/wallhaven-1pzdg1.jpg
+```
+
+It is cropped to your camera's aspect and scaled to fill, so a wallpaper does
+not arrive letterboxed. `EFFECT=none` passes the camera through untouched while
+keeping the output device alive, so apps do not lose their selection when you
+turn effects off.
 
 ## Requirements
 

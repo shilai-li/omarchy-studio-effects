@@ -12,3 +12,21 @@ HEIGHT=720
 
 # Background blur radius, in pixels at the frame's own scale.
 BLUR=12
+
+# none, blur, or replace. `none` still runs the daemon and keeps the output
+# device alive, so apps do not lose their camera selection when you turn
+# effects off.
+EFFECT=blur
+
+# Only read when EFFECT=replace. Cropped to your camera's aspect and scaled to
+# fill, so a wallpaper does not arrive letterboxed.
+BACKGROUND=
+
+# How hard to push the model's output toward solid foreground or background.
+# 1 uses it raw, which makes a moving hand look transparent rather than moving.
+# Higher is more decisive; too high turns hair into a cut-out.
+MASK_GAIN=3.0
+
+# How much of the previous frame's mask to keep, 0 to 0.95. Steadies the edge
+# while you sit still; too much smears the silhouette behind you when you move.
+MASK_SMOOTHING=0.5
