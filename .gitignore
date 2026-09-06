@@ -2,6 +2,11 @@
 # is built, not source. Everything else here is source — this file exists so a
 # stray editor swap never lands in a plugin someone else installs.
 target/
+
+# makepkg's workspace and output, all rebuildable from the checkout.
+/packaging/pkg/
+/packaging/src/
+*.pkg.tar.zst
 /models/*.xml
 /models/*.bin
 

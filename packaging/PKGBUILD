@@ -20,16 +20,30 @@ optdepends=('intel-npu-driver: segmentation on the NPU'
             'openvino-intel-npu-plugin: segmentation on the NPU'
             'openvino-intel-gpu-plugin: segmentation on the GPU')
 
-source=("$pkgname-$pkgver.tar.gz::$url/archive/v$pkgver.tar.gz")
-sha256sums=('SKIP')
+# Built from the checkout this file sits in, not from a release: there is no
+# published tarball yet. `git archive HEAD` rather than a copy, so a package is
+# always built from committed state -- otherwise an experiment left in the tree
+# ends up installed in /usr/bin with a version number that says otherwise.
+#
+# To publish: replace this with
+#   source=("$pkgname-$pkgver.tar.gz::$url/archive/v$pkgver.tar.gz")
+# and drop the prepare() export, keeping the cargo fetch.
+source=()
+sha256sums=()
+
+_repo="$pkgname-$pkgver"
 
 prepare() {
-  cd "$srcdir/$pkgname-$pkgver/daemon"
+  rm -rf "$srcdir/$_repo"
+  mkdir -p "$srcdir/$_repo"
+  git -C "$startdir/.." archive --format=tar HEAD | tar -x -C "$srcdir/$_repo"
+
+  cd "$srcdir/$_repo/daemon"
   cargo fetch --locked
 }
 
 build() {
-  cd "$srcdir/$pkgname-$pkgver"
+  cd "$srcdir/$_repo"
   # The IR is generated, not committed: it is a build product of the .onnx and
   # of whichever OpenVINO version is installed here.
   /usr/bin/python3 tools/convert.py models/selfie_segmentation.onnx \
@@ -39,14 +53,14 @@ build() {
 }
 
 check() {
-  cd "$srcdir/$pkgname-$pkgver/daemon"
+  cd "$srcdir/$_repo/daemon"
   # Covers the two hot loops against slow reference implementations. Needs no
   # camera, no NPU and no loopback, so it runs in a clean build container.
   cargo test --release --frozen
 }
 
 package() {
-  cd "$srcdir/$pkgname-$pkgver"
+  cd "$srcdir/$_repo"
 
   install -Dm755 daemon/target/release/studio-effects-daemon \
                  "$pkgdir/usr/bin/studio-effects-daemon"
