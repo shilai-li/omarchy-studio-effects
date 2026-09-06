@@ -64,6 +64,8 @@ package() {
 
   install -Dm755 daemon/target/release/studio-effects-daemon \
                  "$pkgdir/usr/bin/studio-effects-daemon"
+  install -Dm755 daemon/target/release/studio-effects \
+                 "$pkgdir/usr/bin/studio-effects"
 
   install -Dm644 models/selfie_segmentation.xml \
                  "$pkgdir/usr/share/studio-effects/models/selfie_segmentation.xml"

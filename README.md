@@ -68,6 +68,28 @@ not arrive letterboxed. `EFFECT=none` passes the camera through untouched while
 keeping the output device alive, so apps do not lose their selection when you
 turn effects off.
 
+## Changing things without restarting
+
+Editing the config and restarting drops the camera for a second, which on a
+live call is a black frame everyone sees. The `studio-effects` command talks to
+the running daemon instead:
+
+```bash
+studio-effects                    # or `status` -- what it is doing now, as JSON
+studio-effects toggle             # effects off, or back on to the last one
+studio-effects effect replace
+studio-effects blur 40
+```
+
+Every command answers with the daemon's full state, so a caller never has to ask
+twice, and a refused change is an error in the JSON *and* a non-zero exit.
+
+A Hyprland bind:
+
+```
+bindd = SUPER CTRL, B, Toggle camera effects, exec, studio-effects toggle
+```
+
 ## Requirements
 
 An Intel Core Ultra with an NPU, though it falls back to the GPU and then the

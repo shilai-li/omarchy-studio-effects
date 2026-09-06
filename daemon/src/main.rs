@@ -5,14 +5,12 @@
 //! inference is under a millisecond and colour conversion is not, so the frame
 //! never leaves NV12 and only the 256x256 the model needs is ever converted.
 
-mod background;
-mod device;
-mod mask;
-mod nv12;
-mod segmenter;
 
 use anyhow::{Context, Result};
-use clap::{Parser, ValueEnum};
+use std::sync::{Arc, Mutex};
+use studio_effects_daemon::control::{self, Effect, Fixed, Settings};
+use studio_effects_daemon::{background, device, mask, nv12, segmenter};
+use clap::Parser;
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer_app as gst_app;
@@ -88,17 +86,6 @@ struct Args {
     /// what the composite actually looks like without a loopback device.
     #[arg(long)]
     snapshot: Option<String>,
-}
-
-#[derive(Copy, Clone, PartialEq, Eq, ValueEnum)]
-enum Effect {
-    /// Pass the camera through untouched. Still worth running, because the
-    /// output device stays alive and apps keep their selection.
-    None,
-    /// Blur the background.
-    Blur,
-    /// Replace the background with an image.
-    Replace,
 }
 
 fn parse_device(s: &str) -> Result<String, String> {
@@ -252,19 +239,47 @@ fn main() -> Result<()> {
     let mut mask_filter = mask::MaskFilter::new(args.mask_gain, args.mask_smoothing);
     let mut mask = vec![0.0f32; nv12::NET * nv12::NET];
 
-    let backdrop = match args.effect {
-        Effect::Replace => {
-            // Empty counts as unset: the systemd unit passes --background
-            // unconditionally, because it has no way to omit an argument.
-            let path = args
-                .background
-                .as_deref()
-                .filter(|p| !p.is_empty())
-                .context("--effect replace needs --background <image>")?;
-            Some(background::Background::load(path, args.width, args.height)?)
+    // Empty counts as unset: the systemd unit passes --background
+    // unconditionally, because it has no way to omit an argument.
+    let background_path = args.background.as_deref().filter(|p| !p.is_empty());
+
+    // Loaded whenever one is configured, not only when the effect starts as
+    // `replace`, so switching to it over the socket is instant rather than a
+    // decode stall mid-call.
+    let backdrop = match background_path {
+        Some(path) => Some(background::Background::load(path, args.width, args.height)?),
+        None if args.effect == Effect::Replace => {
+            anyhow::bail!("--effect replace needs --background <image>")
         }
-        _ => None,
+        None => None,
     };
+
+    let settings = Arc::new(Mutex::new(Settings {
+        effect: args.effect,
+        blur: args.blur,
+        resume: if args.effect == Effect::None {
+            Effect::Blur
+        } else {
+            args.effect
+        },
+        has_background: backdrop.is_some(),
+    }));
+
+    match control::serve(
+        Arc::clone(&settings),
+        Fixed {
+            device: seg.device.clone(),
+            input: input.clone(),
+            output: output.clone().unwrap_or_else(|| "(none)".into()),
+            width: args.width,
+            height: args.height,
+        },
+    ) {
+        Ok(path) => println!("control socket at {}", path.display()),
+        // A daemon that cannot be controlled is still a daemon that works, so
+        // this is worth saying and not worth dying over.
+        Err(e) => eprintln!("no control socket: {e:#}"),
+    }
     let mut timings = Timings::default();
     let mut frame_no = 0u32;
 
@@ -290,6 +305,14 @@ fn main() -> Result<()> {
         nv12::write_model_input(y_in, uv_in, w, h, y_stride, uv_stride, seg.input_buffer()?);
         timings.prep += t.elapsed().as_secs_f64() * 1e3;
 
+        // Read once per frame: the socket thread may change these at any point,
+        // and a frame that blurred with one radius and blended with another
+        // would tear.
+        let (effect, blur_radius) = {
+            let s = settings.lock().expect("settings mutex poisoned");
+            (s.effect, s.blur)
+        };
+
         let t = Instant::now();
         mask.copy_from_slice(seg.infer()?);
         timings.infer += t.elapsed().as_secs_f64() * 1e3;
@@ -304,18 +327,22 @@ fn main() -> Result<()> {
             // subject back on top. Doing it this way means neither the blur nor
             // the image copy has to know anything about the mask.
             let t = Instant::now();
-            match (&backdrop, args.effect) {
-                (Some(bg), _) => bg.paint(y_out, uv_out, w, h, y_stride, uv_stride),
-                (None, Effect::Blur) => {
-                    nv12::box_blur(y_out, &mut scratch, w, h, y_stride, args.blur);
-                    nv12::box_blur(uv_out, &mut scratch, w, h / 2, uv_stride, args.blur / 2);
+            match effect {
+                Effect::Replace => {
+                    if let Some(bg) = &backdrop {
+                        bg.paint(y_out, uv_out, w, h, y_stride, uv_stride);
+                    }
                 }
-                (None, _) => {}
+                Effect::Blur => {
+                    nv12::box_blur(y_out, &mut scratch, w, h, y_stride, blur_radius);
+                    nv12::box_blur(uv_out, &mut scratch, w, h / 2, uv_stride, blur_radius / 2);
+                }
+                Effect::None => {}
             }
             timings.blur += t.elapsed().as_secs_f64() * 1e3;
 
             let t = Instant::now();
-            if args.effect != Effect::None {
+            if effect != Effect::None {
                 upscaler.prepare(&mask);
                 nv12::blend_luma(y_in, y_out, &upscaler, w, h, y_stride);
                 nv12::blend_chroma(uv_in, uv_out, &upscaler, w / 2, h / 2, uv_stride);

@@ -49,6 +49,8 @@ daemon/src/mask.rs       conditioning the model's output into an alpha
 daemon/src/background.rs decoding a replacement background once
 daemon/src/segmenter.rs  device choice, model cache, one inference per frame
 daemon/src/device.rs     resolving a v4l2 device by card label
+daemon/src/control.rs    the unix-socket control protocol and its state
+daemon/src/bin/studio-effects.rs   the client that speaks it
 packaging/               systemd units, PKGBUILD, example config
 ```
 
@@ -241,6 +243,36 @@ it. A user can join `render`, log out, log back in, and still have no NPU
 anywhere. Measured both ways: with access `npu_busy_time_us` climbed 54463 us
 over nine seconds; without it, zero, and the daemon announced its fallback
 exactly as designed.
+
+**Settings change over a socket, never by restarting.** Restarting the service
+to change an effect drops the camera for a second, which on a live call is a
+black frame everyone sees. `control.rs` listens on a unix socket in
+`$XDG_RUNTIME_DIR` and the frame loop reads the settings once per frame -- once,
+because a frame that blurred with one radius and blended with another would
+tear.
+
+The client is a separate short-lived binary rather than a library, because the
+bar widget runs inside the `omarchy-shell` process and spawning a command whose
+stdout is one line of JSON is the shape Omarchy plugins already use. Every reply
+carries the full state, so a caller never has to ask twice, and a refusal is
+both an `"error"` field and a non-zero exit -- a widget that only checked the
+exit status and one that only parsed the JSON would each otherwise miss it.
+
+Two failure modes are handled explicitly and both are worth keeping: a socket
+left by a killed daemon is removed, but only after trying to connect to it,
+because that is the only way to tell a stale file from a daemon already running.
+And a daemon that cannot get its socket still runs -- it is a working camera
+that merely cannot be reconfigured, which is not worth dying over.
+
+**A USB camera has exactly one consumer, and the service is usually it.** Once
+`studio-effects.service` is running it holds `/dev/video0`, so any manual
+`studio-effects-daemon` run against the same camera produces no frames at all.
+It does not error -- `v4l2src` simply never delivers a buffer, so the daemon
+prints its two startup lines and then sits there looking like it hung, or like
+whatever you just changed broke the pipeline. `systemctl --user stop
+studio-effects` before testing by hand. This costs at least one debugging
+session per person who forgets, so it is worth suspecting early: startup lines
+present, no timing lines, no error.
 
 **The model's output is a probability, not an alpha.** Using it directly is what
 made a waving hand look transparent: the camera motion-blurs it, the model is

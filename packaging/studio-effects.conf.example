@@ -13,6 +13,10 @@ HEIGHT=720
 # Background blur radius, in pixels at the frame's own scale.
 BLUR=12
 
+# The starting effect. To change it while the daemon runs -- which is what you
+# want on a call, since a restart drops the camera for a second -- use the
+# `studio-effects` command instead of editing this.
+#
 # none, blur, or replace. `none` still runs the daemon and keeps the output
 # device alive, so apps do not lose their camera selection when you turn
 # effects off.
