@@ -75,6 +75,17 @@ var PARAMS = [
     { key: "desat",  label: "Desaturate", min: 0, max: 100, step: 10, effects: ["blur", "replace"] }
 ];
 
+// A setting counts as supported when the daemon reports a value for it.
+function supportedParams(parsed) {
+    var found = {};
+    for (var i = 0; i < PARAMS.length; i++) {
+        var key = PARAMS[i].key;
+        found[key] = parsed !== null && typeof parsed === "object"
+            && typeof parsed[key] === "number";
+    }
+    return found;
+}
+
 function paramFor(key) {
     for (var i = 0; i < PARAMS.length; i++)
         if (PARAMS[i].key === key) return PARAMS[i];
@@ -107,8 +118,10 @@ function panelRows(state) {
         rows.push({ kind: "effect", effect: effects[i], key: "" });
 
     var current = state ? state.effect : "none";
+    var supports = state && state.supports ? state.supports : {};
     for (var j = 0; j < PARAMS.length; j++) {
         if (PARAMS[j].effects.indexOf(current) === -1) continue;
+        if (!supports[PARAMS[j].key]) continue;
         rows.push({ kind: "param", effect: "", key: PARAMS[j].key });
     }
     return rows;
@@ -145,6 +158,7 @@ function unknownState(reason) {
         passes: 1,
         dim: 0,
         desat: 0,
+        supports: supportedParams(null),
         preview: false,
         previewPath: "",
         error: reason || ""
@@ -179,6 +193,13 @@ function parseStatus(text) {
         passes: clampParam("passes", parsed.passes),
         dim: clampParam("dim", parsed.dim),
         desat: clampParam("desat", parsed.desat),
+        // Which settings this daemon actually reports. A widget can be newer
+        // than the daemon it is talking to -- a plugin updates by pulling a
+        // git checkout, the daemon by installing a package, and there is
+        // nothing making those happen together. Offering a row the daemon has
+        // never heard of gives the user a control that does nothing and says
+        // nothing, which is worse than not offering it.
+        supports: supportedParams(parsed),
         device: typeof parsed.device === "string" ? parsed.device : "",
         input: typeof parsed.input === "string" ? parsed.input : "",
         output: typeof parsed.output === "string" ? parsed.output : "",
@@ -299,6 +320,7 @@ if (typeof module !== "undefined" && module.exports) {
         clampParam: clampParam,
         paramCommand: paramCommand,
         paramValue: paramValue,
+        supportedParams: supportedParams,
         panelRows: panelRows,
         stepParam: stepParam,
         indexOfEffect: indexOfEffect,

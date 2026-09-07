@@ -120,15 +120,21 @@ check("a reply with no preview fields never claims a path", () => {
 // ---- Adjustable settings.
 
 check("only settings the current effect uses are offered", () => {
-  const kinds = st => M.panelRows(st).map(r => r.kind + ":" + (r.effect || r.key))
+  // Built through parseStatus rather than by hand: panelRows only offers what
+  // the daemon reported, so a hand-made state would silently offer nothing.
+  const all = '"blur":12,"passes":2,"dim":0,"desat":0'
+  const kinds = json => M.panelRows(M.parseStatus(json)).map(r => r.kind + ":" + (r.effect || r.key))
+
   // Nothing to adjust when effects are off.
-  eq(kinds({ effect: "none", background: false }), ["effect:none", "effect:blur"])
+  eq(kinds('{"effect":"none",' + all + '}'), ["effect:none", "effect:blur"])
+
   // Replace has no blur to soften, so no blur or smoothness rows.
-  const rep = kinds({ effect: "replace", background: true })
+  const rep = kinds('{"effect":"replace","background":true,' + all + '}')
   ok(rep.indexOf("param:blur") === -1, "replace should not offer blur: " + rep)
   ok(rep.indexOf("param:dim") !== -1, "replace should offer darken: " + rep)
+
   // Blur offers all four.
-  const bl = kinds({ effect: "blur", background: false })
+  const bl = kinds('{"effect":"blur",' + all + '}')
   for (const k of ["param:blur", "param:passes", "param:dim", "param:desat"])
     ok(bl.indexOf(k) !== -1, k + " missing from " + bl)
 })
@@ -153,12 +159,35 @@ check("stepping stays inside the range and moves by the right amount", () => {
   eq(M.stepParam({ dim: 50 }, "dim", 1), 60)
 })
 
+check("a daemon that does not report a setting is not offered rows for it", () => {
+  // An older daemon: knows blur, has never heard of passes, dim or desat.
+  const old = M.parseStatus('{"effect":"blur","blur":12}')
+  const keys = M.panelRows(old).filter(r => r.kind === "param").map(r => r.key)
+  eq(keys, ["blur"], "only settings the daemon reports should appear")
+
+  // A current one offers all four.
+  const now = M.parseStatus('{"effect":"blur","blur":12,"passes":2,"dim":0,"desat":0}')
+  eq(M.panelRows(now).filter(r => r.kind === "param").map(r => r.key),
+     ["blur", "passes", "dim", "desat"])
+})
+
+check("a stopped daemon offers no settings at all", () => {
+  eq(M.panelRows(M.notRunningState()).filter(r => r.kind === "param").length, 0)
+})
+
 check("the daemon's values are read back, not defaulted", () => {
   const s = M.parseStatus('{"effect":"blur","blur":30,"passes":3,"dim":45,"desat":80}')
   eq(M.paramValue(s, "blur"), 30, "blur")
   eq(M.paramValue(s, "passes"), 3, "passes")
   eq(M.paramValue(s, "dim"), 45, "dim")
   eq(M.paramValue(s, "desat"), 80, "desat")
+})
+
+check("a reported setting is marked supported, an absent one is not", () => {
+  const s = M.parseStatus('{"effect":"blur","blur":12,"passes":2}')
+  eq(s.supports.blur, true, "blur")
+  eq(s.supports.passes, true, "passes")
+  eq(s.supports.dim, false, "dim absent means unsupported")
 })
 
 check("every adjustable setting survives a round trip through parseStatus", () => {
@@ -177,7 +206,7 @@ check("a reply missing a setting reads as its minimum, never as garbage", () => 
 })
 
 check("the cursor opens on the effect that is on, counting param rows", () => {
-  const st = { effect: "blur", background: false }
+  const st = M.parseStatus('{"effect":"blur","blur":12,"passes":2,"dim":0,"desat":0}')
   const rows = M.panelRows(st)
   eq(rows[M.indexOfEffect(st, rows)].effect, "blur")
 })
@@ -205,10 +234,11 @@ check("replace is offered only when an image is actually loaded", () => {
 })
 
 check("the cursor lands on the current effect, and survives one that is hidden", () => {
-  const rows = M.panelRows({ effect: "blur", background: false })
-  eq(rows[M.indexOfEffect({ effect: "blur" }, rows)].effect, "blur")
+  const st = M.parseStatus('{"effect":"blur","blur":12,"passes":2,"dim":0,"desat":0}')
+  const rows = M.panelRows(st)
+  eq(rows[M.indexOfEffect(st, rows)].effect, "blur")
   // An effect not on offer (replace with no image) must not point off the list.
-  const hidden = M.panelRows({ effect: "replace", background: false })
+  const hidden = M.panelRows(M.parseStatus('{"effect":"replace","blur":12}'))
   ok(M.indexOfEffect({ effect: "replace" }, hidden) < hidden.length, "index must stay in range")
 })
 
