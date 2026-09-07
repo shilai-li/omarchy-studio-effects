@@ -319,6 +319,13 @@ the filter would exist from login whether or not anyone wanted it. And
 when something records from Voice Focus -- otherwise leaving it on would hold
 the mic, which is the audio version of leaving the camera light on.
 
+**Ports existing does not mean the graph runs.** A filter-chain publishes its
+ports from the config before the graph is verified, so `pw-link` showed
+`voice_focus:capture_FL` and `capture_FR` for a graph that was refusing to start
+and producing pure silence. Checking the port list looked like verification and
+was not. Read the log: `pipewire -c <conf>` with `log.level = 2` says exactly
+what is wrong, and a working graph reports no error at all.
+
 **A mono source is honest and comes out of one speaker.** The microphone is
 mono and `noise_suppressor_mono` produces one channel, so the obvious graph
 publishes a single MONO port. Consumers are supposed to upmix that; enough of
