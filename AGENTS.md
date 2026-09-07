@@ -319,6 +319,15 @@ the filter would exist from login whether or not anyone wanted it. And
 when something records from Voice Focus -- otherwise leaving it on would hold
 the mic, which is the audio version of leaving the camera light on.
 
+**A mono source is honest and comes out of one speaker.** The microphone is
+mono and `noise_suppressor_mono` produces one channel, so the obvious graph
+publishes a single MONO port. Consumers are supposed to upmix that; enough of
+them instead map it to front-left and leave the right silent that "my voice only
+comes out of the left speaker" is the expected outcome rather than bad luck. The
+graph therefore names the filter's output twice, so the same denoised signal
+feeds FL and FR. It is the same audio in both -- a stereo microphone this is
+not -- but it plays where people expect.
+
 **Framing is a problem about holding still, not about tracking.** Finding the
 subject is free -- the mask is already a per-pixel map of them, so `subject_box`
 is a scan of 65k values and no second inference. A face detector would cost

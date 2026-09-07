@@ -153,7 +153,17 @@ the NPU. RNNoise is an 85k-parameter network costing about 1% — there is nothi
 to move, and only a much heavier model would change that.
 
 The filter is passive, so your microphone is not actually opened until something
-records from Voice Focus. Leaving it on does not hold your mic.
+records from Voice Focus. Leaving it on does not hold your mic — which is why it
+is worth enabling and leaving alone:
+
+```bash
+systemctl --user enable --now studio-effects-voice
+```
+
+The node only exists while the service runs, so turning it off removes the
+device from every application's list. An app that had it selected loses its
+microphone. (Studio Camera does not have this problem: its loopback is a
+separate always-on service.)
 
 ## Changing things without restarting
 
