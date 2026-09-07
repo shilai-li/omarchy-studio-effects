@@ -276,6 +276,15 @@ cannot be a `QtMultimedia` `Camera` on the output device, however much shorter
 that code would be. The daemon publishes a 320x180 JPEG to `$XDG_RUNTIME_DIR`
 instead, which contends with nothing.
 
+Requests for it follow the **daemon appearing**, not the panel opening. Sending
+it once from `Panel.open()` is the obvious thing and it is wrong: the power
+switch stops and restarts the daemon underneath a panel that stays open the
+whole time, so `open()` never runs again and the new daemon is never asked. The
+symptom is the honest one -- the panel reports that no preview is coming,
+because none was requested -- which reads as the preview being broken rather
+than as never having been asked for, and closing and reopening "fixes" it,
+which points the investigation at the panel instead of the request.
+
 It is written to a temporary name and `rename(2)`d into place, because the
 widget re-reads the file on a timer: rename is atomic within a filesystem, so a
 reader gets the previous whole frame or the next whole frame, never half of one.
