@@ -43,6 +43,11 @@ BarWidget {
   property bool expectRunning: false
   property int settleAttempts: 0
 
+  // Set when a power change was accepted by systemd but the daemon did not
+  // follow. Empty the rest of the time.
+  property string powerNote: ""
+
+
   // ---- Talking to the daemon.
   //
   // Every run carries a generation. A reply that is superseded, that overruns
@@ -92,6 +97,7 @@ BarWidget {
 
   function runUnit(argv, expectRunning) {
     if (unitProc.running || root.switching) return
+    root.powerNote = ""
     root.switching = true
     root.expectRunning = expectRunning
     root.settleAttempts = 0
@@ -105,6 +111,14 @@ BarWidget {
   function settle() {
     if (root.settleAttempts >= Model.SETTLE_ATTEMPTS) {
       root.switching = false
+      // systemd did as it was told and the daemon is still in the wrong state.
+      // Almost always this is a daemon started by hand, outside the service:
+      // the switch stops a unit that is not running while the loose process
+      // keeps the camera. Saying nothing here reads as the switch being broken,
+      // which is exactly the wrong place to go looking.
+      root.powerNote = root.expectRunning
+        ? "The service started but the daemon is not answering."
+        : "Still running after the service stopped — a daemon may have been started outside systemd."
       return
     }
     root.settleAttempts++
@@ -177,6 +191,7 @@ BarWidget {
       desat: root.state.desat,
       framing: root.state.framing,
       voice: root.voice,
+      powerNote: root.powerNote,
       device: root.state.device,
       input: root.state.input,
       output: root.state.output,
@@ -262,8 +277,12 @@ BarWidget {
       // the widget keeps asking, so the glyph never settles on a state the
       // daemon is not actually in.
       if (root.switching) {
-        if (root.state.running === root.expectRunning) root.switching = false
-        else settleTimer.restart()
+        if (root.state.running === root.expectRunning) {
+          root.switching = false
+          root.powerNote = ""
+        } else {
+          settleTimer.restart()
+        }
       }
 
       if (root.pending) {
@@ -286,6 +305,7 @@ BarWidget {
         // systemd refused outright — a masked unit, or one that is not
         // installed. No amount of waiting will change that.
         root.switching = false
+        root.powerNote = "systemd refused to change the service."
         root.noteUnreachable()
         return
       }

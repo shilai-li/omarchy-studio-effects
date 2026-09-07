@@ -33,6 +33,7 @@ Panel {
   readonly property bool running: state.running === true
   readonly property bool switching: host ? host.switching === true : false
   readonly property string voice: host ? host.voice : "missing"
+  readonly property string powerNote: host ? host.powerNote : ""
   readonly property bool voiceSwitching: host ? host.voiceSwitching === true : false
   readonly property var rows: Model.panelRows(root.state)
   readonly property var currentRow: selectedIndex >= 0 && selectedIndex < rows.length
@@ -404,6 +405,23 @@ Panel {
             font.pixelSize: root.voice === "missing" ? Style.font.caption : Style.font.body
             font.bold: root.voice !== "missing"
           }
+        }
+
+        // A power change systemd accepted but the daemon did not follow. Shown
+        // rather than swallowed: the alternative is a switch that appears to do
+        // nothing, which sends anyone looking straight at the widget.
+        Text {
+          width: parent.width
+          visible: root.powerNote.length > 0
+          textFormat: Text.PlainText
+          text: root.powerNote
+          color: root.accentColor
+          font.family: root.contentFontFamily
+          font.pixelSize: Style.font.caption
+          wrapMode: Text.WordWrap
+          leftPadding: Style.space(8)
+          rightPadding: Style.space(8)
+          bottomPadding: Style.space(4)
         }
 
         Text {
