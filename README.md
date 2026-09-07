@@ -110,10 +110,21 @@ Below the effects are the settings that apply to whichever one is on:
 
 | | |
 |---|---|
+| **Auto framing** | tracks you and keeps you centred |
 | **Blur** | radius, 0-200 |
 | **Smoothness** | blur repeats, 1-3. One streaks against hard edges; two looks Gaussian |
 | **Darken** | dim the background, 0-100, so you stand out |
 | **Desaturate** | drain its colour, 0-100 |
+
+Auto framing finds you in the segmentation mask the effects already produce, so
+it needs no face detector and no second model. It crops and scales rather than
+moving anything, so it costs resolution: about 11 ms a frame at 1080p, the most
+expensive thing here, which is why it is off unless you ask for it.
+
+It is built to move as little as possible. You can drift a little without the
+camera reacting at all, a real move is followed slowly, and stepping out of shot
+holds the frame rather than snapping back — a camera that tracks every twitch
+makes the room slide around behind you, which looks broken rather than framed.
 
 Darken and desaturate touch the background only, never you, and work behind a
 replaced image as well as a blur. Settings the current effect ignores are not

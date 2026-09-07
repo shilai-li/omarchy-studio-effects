@@ -54,6 +54,7 @@ daemon/src/background.rs decoding a replacement background once
 daemon/src/preview.rs    the JPEG the bar widget shows
 daemon/src/segmenter.rs  device choice, model cache, one inference per frame
 daemon/src/device.rs     resolving a v4l2 device by card label
+daemon/src/framing.rs    where to crop so the subject stays centred
 daemon/src/control.rs    the unix-socket control protocol and its state
 daemon/src/bin/studio-effects.rs   the client that speaks it
 packaging/               systemd units, PKGBUILD, example config
@@ -296,6 +297,24 @@ killed rather than stopped is removed at the next start.
 
 Cost is inside the noise: 12.90 ms/frame with it off against 12.69-13.08 with it
 on, at 1080p, publishing about nine frames a second.
+
+**Framing is a problem about holding still, not about tracking.** Finding the
+subject is free -- the mask is already a per-pixel map of them, so `subject_box`
+is a scan of 65k values and no second inference. A face detector would cost
+another model and could disagree with the one doing the compositing, which shows
+as the frame drifting away from the cut-out.
+
+Everything in `framing.rs` exists to keep the crop still: a dead zone the subject
+may drift inside before anything moves, heavy easing once it does, a zoom cap
+because the crop is scaled back up and past a point the picture is visibly soft,
+and a hold when the subject is lost rather than a snap to the full frame. A frame
+that follows every twitch is worse than one that never moves -- the viewer sees
+the room sliding behind a subject who appears pinned, and reads it as a broken
+camera. The tests are written against that, not against tracking accuracy.
+
+The crop runs **last**, after segmentation and compositing, so both always see
+the whole frame. A subject who walks outside the crop still has to be findable,
+or the camera could never follow them back.
 
 **Adding a setting means four places, and the parser is the one that gets
 forgotten.** `Model.PARAMS` is the single list the panel builds its rows from,
