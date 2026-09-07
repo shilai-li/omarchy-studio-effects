@@ -345,7 +345,27 @@ a stale edge for one frame is invisible, a stutter is not.
 cd daemon && cargo test             # reference tests for the hot loops and the mask
 
 omarchy plugin validate .           # manifest + entry points
+bash test/model-test.sh             # Model.js under plain node, no compositor
+
+cp -r . ~/.config/omarchy/plugins/shilai_li.studio-effects   # no symlinks; validator rejects them
+QT_FORCE_STDERR_LOGGING=1 /usr/lib/qt6/bin/qmllint -I /usr/share/omarchy/shell BarWidget.qml
 ```
+
+Saving under `~/.config/omarchy/plugins/` hot-reloads QML, so the edit loop is
+save then open the panel. **Two things do not hot-reload.** An already-bound
+`IpcHandler` target belongs to the first handler bound to it for the life of the
+shell process, so adding a method and reinstalling leaves
+`omarchy-shell <id> <newMethod>` answering `Function not found` while everything
+else works; `Model.js`'s imported copy is cached the same way. Both need
+`omarchy-restart-shell`. The panel changing while the IPC does not is exactly
+what makes this hard to spot -- it reads as the widget failing to do the thing,
+not as a stale handler.
+
+Reading qmllint output: `qs.Commons` and `qs.Ui` cannot resolve outside
+Quickshell, so every file emits a cascade of `[import]`, `[unqualified]`,
+`[unresolved-type]` and friends. That is noise; the shipped built-ins emit the
+same. Compare *categories* against `omarchy-recent-paths`, not counts -- a
+category ours emits that theirs does not is the one worth chasing.
 
 Model provenance: MediaPipe Selfie Segmentation, taken as the ONNX export from
 `onnx-community/mediapipe_selfie_segmentation` on Hugging Face. **Not** the
