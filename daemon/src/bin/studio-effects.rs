@@ -16,6 +16,7 @@ usage: studio-effects [command]
   effect none|blur|replace     choose an effect
   toggle                       turn effects off, or back on to the last one
   blur <0-200>                 background blur radius
+  preview on|off               publish preview frames for the bar widget
 
 With no command, prints status. Every command answers with the daemon's full
 state, so a caller never has to ask twice.";
