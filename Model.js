@@ -142,6 +142,9 @@ function unknownState(reason) {
         input: "",
         output: "",
         background: false,
+        passes: 1,
+        dim: 0,
+        desat: 0,
         preview: false,
         previewPath: "",
         error: reason || ""
@@ -170,6 +173,12 @@ function parseStatus(text) {
         running: true,
         effect: effect,
         blur: clampBlur(parsed.blur),
+        // Read by name from PARAMS so adding a setting in one place is enough;
+        // forgetting this step showed every new slider sitting at its minimum
+        // while the daemon was plainly using something else.
+        passes: clampParam("passes", parsed.passes),
+        dim: clampParam("dim", parsed.dim),
+        desat: clampParam("desat", parsed.desat),
         device: typeof parsed.device === "string" ? parsed.device : "",
         input: typeof parsed.input === "string" ? parsed.input : "",
         output: typeof parsed.output === "string" ? parsed.output : "",

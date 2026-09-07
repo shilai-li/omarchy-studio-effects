@@ -153,6 +153,23 @@ check("stepping stays inside the range and moves by the right amount", () => {
   eq(M.stepParam({ dim: 50 }, "dim", 1), 60)
 })
 
+check("the daemon's values are read back, not defaulted", () => {
+  const s = M.parseStatus('{"effect":"blur","blur":30,"passes":3,"dim":45,"desat":80}')
+  eq(M.paramValue(s, "blur"), 30, "blur")
+  eq(M.paramValue(s, "passes"), 3, "passes")
+  eq(M.paramValue(s, "dim"), 45, "dim")
+  eq(M.paramValue(s, "desat"), 80, "desat")
+})
+
+check("every adjustable setting survives a round trip through parseStatus", () => {
+  // The panel reads each PARAMS entry off the parsed state, so a setting the
+  // daemon reports and the parser drops shows as a slider stuck at its minimum.
+  const json = '{"effect":"blur","blur":66,"passes":3,"dim":10,"desat":20}'
+  const s = M.parseStatus(json)
+  for (const p of M.PARAMS)
+    ok(typeof s[p.key] === "number", p.key + " missing from parsed state")
+})
+
 check("a reply missing a setting reads as its minimum, never as garbage", () => {
   const s = M.parseStatus('{"effect":"blur"}')
   eq(M.paramValue(s, "passes"), 1, "passes")
