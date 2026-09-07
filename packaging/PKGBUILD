@@ -11,7 +11,12 @@ license=('MIT')
 # videoscale and appsrc/appsink; -bad carries the jpeg decoding decodebin picks
 # for a USB camera.
 depends=('openvino' 'gstreamer' 'gst-plugins-base' 'gst-plugins-good'
-         'v4l2loopback-dkms' 'v4l2loopback-utils')
+         'v4l2loopback-dkms' 'v4l2loopback-utils'
+         # Voice Focus: the RNNoise LADSPA plugin, run inside a PipeWire
+         # filter-chain. A hard dependency because the unit ships enabled-able
+         # and a filter-chain pointing at a missing plugin fails at load with
+         # nothing useful in the journal.
+         'pipewire' 'noise-suppression-for-voice')
 makedepends=('cargo' 'python-openvino')
 
 # The NPU is the point, but the daemon falls back to GPU and then CPU, so none
@@ -76,6 +81,10 @@ package() {
                  "$pkgdir/usr/lib/systemd/system/studio-effects-loopback.service"
   install -Dm644 packaging/studio-effects.service \
                  "$pkgdir/usr/lib/systemd/user/studio-effects.service"
+  install -Dm644 packaging/studio-effects-voice.service \
+                 "$pkgdir/usr/lib/systemd/user/studio-effects-voice.service"
+  install -Dm644 packaging/voice-focus.conf \
+                 "$pkgdir/usr/share/studio-effects/voice-focus.conf"
 
   install -Dm644 packaging/studio-effects.conf.example \
                  "$pkgdir/usr/share/studio-effects/studio-effects.conf.example"

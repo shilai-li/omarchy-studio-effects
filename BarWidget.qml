@@ -33,6 +33,12 @@ BarWidget {
   // A start or stop is in flight. The daemon takes a moment to open the camera
   // after systemd reports the unit started, so the widget waits for the socket
   // to answer rather than claiming success the instant systemctl returns.
+  // Voice focus: "on", "off", or "missing" when the unit is not installed.
+  // Asked of systemd on its own, because it is a separate unit and the camera
+  // daemon knows nothing about audio.
+  property string voice: "missing"
+  property bool voiceSwitching: false
+
   property bool switching: false
   property bool expectRunning: false
   property int settleAttempts: 0
@@ -111,6 +117,26 @@ BarWidget {
   function setParam(key, value) { root.send(Model.paramCommand(key, value)) }
   function setToggle(key, on) { root.send(Model.toggleCommand(key, on)) }
 
+  // ---- Voice focus. Its own process, its own state: nothing here goes through
+  //      the camera daemon's socket, so it works with the camera off.
+  function readVoice() {
+    if (voiceProc.running) return
+    voiceProc.command = Model.voiceStatusCommand()
+    voiceProc.running = true
+  }
+
+  function setVoice(on) {
+    if (voiceUnitProc.running || root.voiceSwitching) return
+    root.voiceSwitching = true
+    voiceUnitProc.command = Model.voiceCommand(on)
+    voiceUnitProc.running = true
+  }
+
+  function toggleVoice() {
+    if (root.voice === "missing") return
+    root.setVoice(root.voice !== "on")
+  }
+
   // Asked for only while the panel is open. Nothing is encoded for a picture
   // nobody is looking at, and the daemon deletes the last frame when it stops
   // -- so a widget can never show a still of a camera that is no longer on.
@@ -150,6 +176,7 @@ BarWidget {
       dim: root.state.dim,
       desat: root.state.desat,
       framing: root.state.framing,
+      voice: root.voice,
       device: root.state.device,
       input: root.state.input,
       output: root.state.output,
@@ -191,7 +218,10 @@ BarWidget {
   onBarChanged: injectPanel()
   onSettingsChanged: injectPanel()
 
-  Component.onCompleted: root.refresh()
+  Component.onCompleted: {
+    root.refresh()
+    root.readVoice()
+  }
 
   // Nothing this widget started may outlive it. The panel is destroyed on a
   // shell reload as well as on shutdown, and a client left running would go on
@@ -202,6 +232,8 @@ BarWidget {
     root.abandon()
     if (clientProc.running) clientProc.running = false
     if (unitProc.running) unitProc.running = false
+    if (voiceProc.running) voiceProc.running = false
+    if (voiceUnitProc.running) voiceUnitProc.running = false
   }
 
   Process {
@@ -261,6 +293,25 @@ BarWidget {
     }
   }
 
+  // `is-active` exits non-zero for anything but active, so the word it printed
+  // is what gets read rather than the exit status: a code cannot tell "stopped"
+  // from "no such unit", and those need different words in the panel.
+  Process {
+    id: voiceProc
+    stdout: StdioCollector { id: voiceOut; waitForEnd: true }
+    onExited: root.voice = Model.parseVoiceState(voiceOut.text)
+  }
+
+  Process {
+    id: voiceUnitProc
+    onExited: {
+      root.voiceSwitching = false
+      // systemd has returned, but the filter takes a moment to publish its
+      // node, so the answer is read rather than assumed.
+      root.readVoice()
+    }
+  }
+
   Timer {
     id: settleTimer
     interval: Model.SETTLE_INTERVAL_MS
@@ -294,7 +345,10 @@ BarWidget {
     interval: 10000
     running: true
     repeat: true
-    onTriggered: if (!root.opened) root.refresh()
+    onTriggered: if (!root.opened) {
+      root.refresh()
+      root.readVoice()
+    }
   }
 
   Loader {
@@ -321,6 +375,7 @@ BarWidget {
     function on(): void { root.startService() }
     function off(): void { root.stopService() }
     function togglePower(): void { root.toggleService() }
+    function toggleVoice(): void { root.toggleVoice() }
     function status(): string { return root.statusJson() }
   }
 

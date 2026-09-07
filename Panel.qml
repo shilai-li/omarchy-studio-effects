@@ -32,6 +32,8 @@ Panel {
   readonly property var state: host ? host.state : Model.notRunningState()
   readonly property bool running: state.running === true
   readonly property bool switching: host ? host.switching === true : false
+  readonly property string voice: host ? host.voice : "missing"
+  readonly property bool voiceSwitching: host ? host.voiceSwitching === true : false
   readonly property var rows: Model.panelRows(root.state)
   readonly property var currentRow: selectedIndex >= 0 && selectedIndex < rows.length
     ? rows[selectedIndex] : null
@@ -63,6 +65,9 @@ Panel {
     // daemon's whole state. Asking for both would be one request too many --
     // only one command is in flight at a time, so the second would be dropped.
     if (root.host) root.host.setPreview(true)
+    // Voice focus is a different unit with a life of its own -- a keybinding or
+    // systemctl may have changed it since the last poll.
+    if (root.host) root.host.readVoice()
     root.syncCursorToEffect()
     root.controller.show()
     Qt.callLater(function() {
@@ -133,11 +138,16 @@ Panel {
     if (root.host) root.host.toggleService()
   }
 
+  function toggleVoice() {
+    if (root.host) root.host.toggleVoice()
+  }
+
   function handleTextKey(text) {
     var key = String(text).toLowerCase()
     if (key === "r" && root.host) root.host.refresh()
     else if (key === "f" && root.host) root.host.toggle()
     else if (key === "p") root.togglePower()
+    else if (key === "v") root.toggleVoice()
   }
 
   // The preview is asked for on open, but a daemon can arrive long after that:
@@ -346,6 +356,56 @@ Panel {
           }
         }
 
+        // A peer of the power switch, not one of the effects: it filters the
+        // microphone, works with the camera off, and is a separate unit that
+        // fails on its own.
+        CursorSurface {
+          id: voiceRow
+          width: parent.width
+          height: root.rowHeight
+          hasCursor: false
+          foreground: root.contentForeground
+          accent: Color.accent
+          fill: root.hoverFill
+          currentFill: root.selectedFill
+
+          MouseArea {
+            anchors.fill: parent
+            hoverEnabled: true
+            cursorShape: root.voice === "missing" ? Qt.ArrowCursor : Qt.PointingHandCursor
+            onClicked: root.toggleVoice()
+          }
+
+          Text {
+            anchors.left: parent.left
+            anchors.leftMargin: Style.space(8)
+            anchors.verticalCenter: parent.verticalCenter
+            textFormat: Text.PlainText
+            text: "Voice Focus"
+            color: root.voice === "missing" ? root.dim : root.contentForeground
+            font.family: root.contentFontFamily
+            font.pixelSize: Style.font.body
+          }
+
+          Text {
+            anchors.right: parent.right
+            anchors.rightMargin: Style.space(8)
+            anchors.verticalCenter: parent.verticalCenter
+            textFormat: Text.PlainText
+            // "Missing" rather than "Off": one is a switch you can flip, the
+            // other is a package that is not installed, and offering to toggle
+            // something that cannot start is how a control loses trust.
+            text: root.voiceSwitching ? "…"
+                : root.voice === "on" ? "On"
+                : root.voice === "off" ? "Off"
+                : "not installed"
+            color: root.voice === "on" ? root.accentColor : root.dim
+            font.family: root.contentFontFamily
+            font.pixelSize: root.voice === "missing" ? Style.font.caption : Style.font.body
+            font.bold: root.voice !== "missing"
+          }
+        }
+
         Text {
           width: parent.width
           visible: !root.running && !root.switching
@@ -526,12 +586,12 @@ Panel {
         Text {
           width: parent.width
           textFormat: Text.PlainText
-          text: !root.running ? "p turn on   esc close"
+          text: !root.running ? "p camera   v voice   esc close"
               : root.currentRow && root.currentRow.kind === "param"
-              ? "↑↓ move   ←→ adjust   p off   esc close"
+              ? "↑↓ move   ←→ adjust   p off   v voice   esc close"
               : root.currentRow && root.currentRow.kind === "toggle"
-              ? "↑↓ move   enter switch   p off   esc close"
-              : "↑↓ move   enter choose   p off   esc close"
+              ? "↑↓ move   enter switch   p off   v voice   esc close"
+              : "↑↓ move   enter choose   p off   v voice   esc close"
           color: root.dim
           font.family: root.contentFontFamily
           font.pixelSize: Style.font.caption

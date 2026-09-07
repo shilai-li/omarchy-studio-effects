@@ -15,6 +15,13 @@ var BINARY = "/usr/bin/studio-effects";
 var SYSTEMCTL = "/usr/bin/systemctl";
 var UNIT = "studio-effects.service";
 
+// Voice focus is a second, independent unit. Denoising a call you are on with
+// the camera off is a normal thing to want, and the two fail independently, so
+// a camera that will not start must not take the microphone filter with it.
+// That means its state is asked of systemd rather than of the camera daemon,
+// which knows nothing about audio.
+var VOICE_UNIT = "studio-effects-voice.service";
+
 var EFFECTS = ["none", "blur", "replace"];
 var BLUR_MIN = 0;
 var BLUR_MAX = 200;
@@ -38,6 +45,29 @@ function statusCommand() { return command(["status"]); }
 
 function startCommand() { return [SYSTEMCTL, "--user", "start", UNIT]; }
 function stopCommand() { return [SYSTEMCTL, "--user", "stop", UNIT]; }
+
+function voiceCommand(on) {
+    return [SYSTEMCTL, "--user", on ? "start" : "stop", VOICE_UNIT];
+}
+
+// `is-active` prints one word and exits non-zero when the answer is anything
+// but active, so the word is what gets read: an exit code cannot distinguish
+// "stopped" from "this unit does not exist", and those need different words in
+// the panel.
+function voiceStatusCommand() {
+    return [SYSTEMCTL, "--user", "is-active", VOICE_UNIT];
+}
+
+// systemd's vocabulary, reduced to the three states the panel can say something
+// useful about.
+function parseVoiceState(text) {
+    var word = String(text === undefined || text === null ? "" : text).trim();
+    if (word === "active" || word === "activating") return "on";
+    if (word === "inactive" || word === "deactivating" || word === "failed") return "off";
+    // "unknown" from systemd means no such unit: the package is older than this
+    // widget, or was never installed.
+    return "missing";
+}
 
 // The daemon needs a moment to open the camera after systemd reports the unit
 // started, so the widget re-asks rather than concluding from one silent reply
@@ -326,6 +356,10 @@ if (typeof module !== "undefined" && module.exports) {
         MAX_REPLY_BYTES: MAX_REPLY_BYTES,
         SYSTEMCTL: SYSTEMCTL,
         UNIT: UNIT,
+        VOICE_UNIT: VOICE_UNIT,
+        voiceCommand: voiceCommand,
+        voiceStatusCommand: voiceStatusCommand,
+        parseVoiceState: parseVoiceState,
         SETTLE_ATTEMPTS: SETTLE_ATTEMPTS,
         SETTLE_INTERVAL_MS: SETTLE_INTERVAL_MS,
         command: command,

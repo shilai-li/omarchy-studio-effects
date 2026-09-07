@@ -298,6 +298,27 @@ killed rather than stopped is removed at the next start.
 Cost is inside the noise: 12.90 ms/frame with it off against 12.69-13.08 with it
 on, at 1080p, publishing about nine frames a second.
 
+**Voice focus is on the CPU on purpose, and that is the interesting part.** The
+NPU thesis does not transfer to audio. Segmentation was worth moving because it
+costs 12.4% of a core on the CPU and 1.6% on the NPU; RNNoise is an
+85k-parameter GRU costing about 1%, so there is nothing to save and no power
+story. Only a much heavier model -- DeepFilterNet, say -- would change that, and
+it is not currently obtainable as ONNX. Do not put speech on the NPU here
+without first measuring what it would actually buy.
+
+It is also a separate unit and a separate process, and must stay that way. Voice
+and camera are independent -- denoising a call with the camera off is normal --
+and they fail independently, so a camera that will not start must not take the
+microphone filter down with it. The widget therefore asks systemd about it
+rather than the camera daemon, which knows nothing about audio.
+
+The filter-chain runs as its own PipeWire instance rather than as a drop-in
+under `~/.config/pipewire/pipewire.conf.d/`, because a drop-in is always loaded:
+the filter would exist from login whether or not anyone wanted it. And
+`capture.props` sets `node.passive = true`, so the microphone is only opened
+when something records from Voice Focus -- otherwise leaving it on would hold
+the mic, which is the audio version of leaving the camera light on.
+
 **Framing is a problem about holding still, not about tracking.** Finding the
 subject is free -- the mask is already a per-pixel map of them, so `subject_box`
 is a scan of 65k values and no second inference. A face detector would cost

@@ -102,6 +102,8 @@ frame for the widget instead.
 | `↑` `↓` (or `k` `j`) | move |
 | `enter` / `space` | choose that effect |
 | `←` `→` (or `h` `l`) | adjust the selected setting |
+| `p` | camera effects on or off |
+| `v` | voice focus on or off |
 | `f` | turn effects off, or back on |
 | `r` | re-read the daemon |
 | `esc` | close |
@@ -134,6 +136,24 @@ shown — replace has no blur to soften, so it offers no blur rows.
 loaded, because offering a choice it would refuse is worse than not offering it.
 If the daemon is not running the panel says so, and says which command starts
 it.
+
+## Voice Focus
+
+A denoised copy of your microphone, published as a second source called **Voice
+Focus**. Turn it on with `v` in the panel, or click its row, then pick it as
+your microphone.
+
+It is a separate service from the camera, on purpose: denoising a call you are
+on with your camera off is a normal thing to want, and the two fail
+independently.
+
+The suppression is RNNoise, on the CPU deliberately. The NPU earns its place in
+the video path because segmentation costs 12.4% of a core there against 1.6% on
+the NPU. RNNoise is an 85k-parameter network costing about 1% — there is nothing
+to move, and only a much heavier model would change that.
+
+The filter is passive, so your microphone is not actually opened until something
+records from Voice Focus. Leaving it on does not hold your mic.
 
 ## Changing things without restarting
 

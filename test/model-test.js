@@ -65,6 +65,30 @@ check("off says the camera is released, not merely that effects are off", () => 
   ok(M.powerHint({ running: true }).indexOf("open") !== -1)
 })
 
+// ---- Voice focus. A separate unit, asked of systemd rather than the daemon.
+
+check("voice focus is its own unit, started by absolute path", () => {
+  ok(M.VOICE_UNIT !== M.UNIT, "voice must not be the camera unit")
+  eq(M.voiceCommand(true), [M.SYSTEMCTL, "--user", "start", M.VOICE_UNIT])
+  eq(M.voiceCommand(false), [M.SYSTEMCTL, "--user", "stop", M.VOICE_UNIT])
+  eq(M.voiceStatusCommand(), [M.SYSTEMCTL, "--user", "is-active", M.VOICE_UNIT])
+})
+
+check("systemd's words are reduced to on, off or missing", () => {
+  eq(M.parseVoiceState("active"), "on")
+  eq(M.parseVoiceState("activating"), "on")
+  eq(M.parseVoiceState("inactive"), "off")
+  eq(M.parseVoiceState("failed"), "off")
+  eq(M.parseVoiceState("active\n"), "on", "trailing newline")
+})
+
+check("a unit that does not exist is missing, not merely off", () => {
+  // The distinction matters: off offers a switch, missing asks for an install.
+  eq(M.parseVoiceState("unknown"), "missing")
+  eq(M.parseVoiceState(""), "missing")
+  eq(M.parseVoiceState("something new"), "missing")
+})
+
 // ---- Parsing. Every reply carries the whole state, so this is the only
 //      place a reply is ever interpreted.
 
