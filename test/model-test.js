@@ -71,22 +71,31 @@ check("voice focus is its own unit, started by absolute path", () => {
   ok(M.VOICE_UNIT !== M.UNIT, "voice must not be the camera unit")
   eq(M.voiceCommand(true), [M.SYSTEMCTL, "--user", "start", M.VOICE_UNIT])
   eq(M.voiceCommand(false), [M.SYSTEMCTL, "--user", "stop", M.VOICE_UNIT])
-  eq(M.voiceStatusCommand(), [M.SYSTEMCTL, "--user", "is-active", M.VOICE_UNIT])
+  eq(M.voiceStatusCommand()[0], M.SYSTEMCTL)
+  ok(M.voiceStatusCommand().indexOf(M.VOICE_UNIT) !== -1, "must name the voice unit")
 })
 
-check("systemd's words are reduced to on, off or missing", () => {
-  eq(M.parseVoiceState("active"), "on")
-  eq(M.parseVoiceState("activating"), "on")
-  eq(M.parseVoiceState("inactive"), "off")
-  eq(M.parseVoiceState("failed"), "off")
-  eq(M.parseVoiceState("active\n"), "on", "trailing newline")
+check("systemd's two lines are reduced to on, off or missing", () => {
+  eq(M.parseVoiceState("loaded\nactive\n"), "on")
+  eq(M.parseVoiceState("loaded\nactivating\n"), "on")
+  eq(M.parseVoiceState("loaded\ninactive\n"), "off")
+  eq(M.parseVoiceState("loaded\nfailed\n"), "off")
 })
 
 check("a unit that does not exist is missing, not merely off", () => {
-  // The distinction matters: off offers a switch, missing asks for an install.
-  eq(M.parseVoiceState("unknown"), "missing")
-  eq(M.parseVoiceState(""), "missing")
-  eq(M.parseVoiceState("something new"), "missing")
+  // This is why LoadState is asked for at all. `is-active` prints "inactive"
+  // for a unit that does not exist -- the same word as for one that is simply
+  // stopped -- so a widget reading that alone offers a switch for a package
+  // that was never installed.
+  eq(M.parseVoiceState("not-found\ninactive\n"), "missing")
+  eq(M.parseVoiceState(""), "missing", "no reply at all")
+  eq(M.parseVoiceState("loaded"), "missing", "a truncated reply is not trusted")
+})
+
+check("the status command asks for the load state, not just is-active", () => {
+  const cmd = M.voiceStatusCommand()
+  ok(cmd.indexOf("LoadState") !== -1, "must ask LoadState: " + cmd.join(" "))
+  ok(cmd.indexOf("is-active") === -1, "is-active cannot answer this")
 })
 
 // ---- Parsing. Every reply carries the whole state, so this is the only

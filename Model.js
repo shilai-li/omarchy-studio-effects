@@ -50,23 +50,29 @@ function voiceCommand(on) {
     return [SYSTEMCTL, "--user", on ? "start" : "stop", VOICE_UNIT];
 }
 
-// `is-active` prints one word and exits non-zero when the answer is anything
-// but active, so the word is what gets read: an exit code cannot distinguish
-// "stopped" from "this unit does not exist", and those need different words in
-// the panel.
+// Asks for LoadState and ActiveState rather than using `is-active`, which
+// cannot answer the question. `is-active` prints "inactive" for a unit that
+// does not exist at all, the same word it prints for one that is merely
+// stopped, and only the exit code differs -- 4 against 3. Reading a state
+// machine off an exit code is how "not installed" ends up displayed as a switch
+// the user can flip. `show` says "not-found" outright.
 function voiceStatusCommand() {
-    return [SYSTEMCTL, "--user", "is-active", VOICE_UNIT];
+    return [SYSTEMCTL, "--user", "show", VOICE_UNIT,
+            "-p", "LoadState", "-p", "ActiveState", "--value"];
 }
 
-// systemd's vocabulary, reduced to the three states the panel can say something
-// useful about.
+// Two lines, LoadState then ActiveState, reduced to the three states the panel
+// can say something useful about.
 function parseVoiceState(text) {
-    var word = String(text === undefined || text === null ? "" : text).trim();
-    if (word === "active" || word === "activating") return "on";
-    if (word === "inactive" || word === "deactivating" || word === "failed") return "off";
-    // "unknown" from systemd means no such unit: the package is older than this
-    // widget, or was never installed.
-    return "missing";
+    var lines = String(text === undefined || text === null ? "" : text)
+        .split("\n")
+        .map(function (l) { return l.trim(); })
+        .filter(function (l) { return l.length > 0; });
+
+    if (lines.length < 2) return "missing";
+    if (lines[0] !== "loaded") return "missing";
+    if (lines[1] === "active" || lines[1] === "activating") return "on";
+    return "off";
 }
 
 // The daemon needs a moment to open the camera after systemd reports the unit
