@@ -111,7 +111,12 @@ Panel {
   //      the change land, and the next thing a user does is often adjust it.
   function chooseSelected() {
     if (!root.host || !root.currentRow) return
-    if (root.currentRow.kind === "effect") root.host.setEffect(root.currentRow.effect)
+    if (root.currentRow.kind === "effect") {
+      root.host.setEffect(root.currentRow.effect)
+    } else if (root.currentRow.kind === "toggle") {
+      root.host.setToggle(root.currentRow.key,
+                          !Model.toggleValue(root.state, root.currentRow.key))
+    }
   }
 
   // Left and right adjust whatever row the cursor is on, and nothing at all on
@@ -160,6 +165,8 @@ Panel {
     required property var modelData
 
     readonly property bool isParam: modelData && modelData.kind === "param"
+    readonly property bool isToggle: modelData && modelData.kind === "toggle"
+    readonly property var toggleSpec: row.isToggle ? Model.toggleFor(modelData.key) : null
     readonly property string effect: modelData && modelData.effect ? modelData.effect : ""
     readonly property string paramKey: modelData && modelData.key ? modelData.key : ""
     readonly property var spec: row.isParam ? Model.paramFor(row.paramKey) : null
@@ -212,6 +219,7 @@ Panel {
       anchors.verticalCenter: parent.verticalCenter
       textFormat: Text.PlainText
       text: row.isParam ? (row.spec ? row.spec.label : row.paramKey)
+          : row.isToggle ? (row.toggleSpec ? row.toggleSpec.label : row.paramKey)
           : row.effect === "none" ? "Off"
           : row.effect === "blur" ? "Blur background"
           : "Replace background"
@@ -221,22 +229,25 @@ Panel {
       elide: Text.ElideRight
     }
 
-    // The value, with arrows on the selected row so it is discoverable that
-    // this one is adjusted rather than chosen.
+    // The value. Sliders get arrows on the selected row so it is discoverable
+    // that they are adjusted rather than chosen; a toggle just reads On or Off.
     Text {
       anchors.right: parent.right
       anchors.rightMargin: Style.space(8)
       anchors.verticalCenter: parent.verticalCenter
-      visible: row.isParam
+      visible: row.isParam || row.isToggle
       textFormat: Text.PlainText
       text: {
+        if (row.isToggle) return Model.toggleValue(root.state, row.paramKey) ? "On" : "Off"
         if (!row.isParam) return ""
         var v = Model.paramValue(root.state, row.paramKey)
         return row.hasCursor ? "\u2039 " + v + " \u203a" : String(v)
       }
-      color: row.hasCursor ? root.accentColor : root.dim
+      color: row.isToggle && Model.toggleValue(root.state, row.paramKey) ? root.accentColor
+           : row.hasCursor ? root.accentColor : root.dim
       font.family: root.contentFontFamily
       font.pixelSize: Style.font.body
+      font.bold: row.isToggle
     }
   }
 
@@ -518,6 +529,8 @@ Panel {
           text: !root.running ? "p turn on   esc close"
               : root.currentRow && root.currentRow.kind === "param"
               ? "↑↓ move   ←→ adjust   p off   esc close"
+              : root.currentRow && root.currentRow.kind === "toggle"
+              ? "↑↓ move   enter switch   p off   esc close"
               : "↑↓ move   enter choose   p off   esc close"
           color: root.dim
           font.family: root.contentFontFamily

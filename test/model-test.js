@@ -211,6 +211,32 @@ check("the cursor opens on the effect that is on, counting param rows", () => {
   eq(rows[M.indexOfEffect(st, rows)].effect, "blur")
 })
 
+// ---- Auto framing.
+
+check("framing is offered with the effects, not under one of them", () => {
+  // Worth having with no background effect at all.
+  const off = M.parseStatus('{"effect":"none","blur":12,"framing":false}')
+  const keys = M.panelRows(off).map(r => r.kind + ":" + (r.effect || r.key))
+  ok(keys.indexOf("toggle:framing") !== -1, "framing missing with effects off: " + keys)
+})
+
+check("a daemon that does not report framing is not offered it", () => {
+  const older = M.parseStatus('{"effect":"blur","blur":12}')
+  eq(M.panelRows(older).filter(r => r.kind === "toggle").length, 0)
+})
+
+check("framing is sent as on or off, never as a number", () => {
+  eq(M.toggleCommand("framing", true), [M.BINARY, "framing", "on"])
+  eq(M.toggleCommand("framing", false), [M.BINARY, "framing", "off"])
+  eq(M.toggleCommand("banana", true), null)
+})
+
+check("framing state is read back from the daemon", () => {
+  eq(M.toggleValue(M.parseStatus('{"effect":"blur","framing":true}'), "framing"), true)
+  eq(M.toggleValue(M.parseStatus('{"effect":"blur","framing":false}'), "framing"), false)
+  eq(M.toggleValue(M.notRunningState(), "framing"), false, "a stopped daemon frames nothing")
+})
+
 // ---- What the bar shows.
 
 check("the glyph distinguishes off, blurred and replaced", () => {

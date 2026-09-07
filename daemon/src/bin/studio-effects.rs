@@ -19,6 +19,7 @@ usage: studio-effects [command]
   passes <1-3>                 blur repeats; 1 is boxy, 2 looks Gaussian
   dim <0-100>                  darken the background
   desat <0-100>                drain colour from the background
+  framing on|off               track the subject and keep them centred
   preview on|off               publish preview frames for the bar widget
 
 With no command, prints status. Every command answers with the daemon's full

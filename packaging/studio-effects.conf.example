@@ -24,6 +24,10 @@ DIM=0
 # Drain colour from the background, 0 to 100.
 DESAT=0
 
+# Track you and keep you centred. Costs about 11 ms a frame at 1080p, which is
+# the most expensive thing here, so it is off unless asked for.
+FRAMING=off
+
 # The starting effect. To change it while the daemon runs -- which is what you
 # want on a call, since a restart drops the camera for a second -- use the
 # `studio-effects` command instead of editing this.

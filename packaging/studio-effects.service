@@ -30,6 +30,7 @@ Environment=BLUR=12
 Environment=PASSES=2
 Environment=DIM=0
 Environment=DESAT=0
+Environment=FRAMING=off
 Environment=EFFECT=blur
 Environment=BACKGROUND=
 Environment=MASK_GAIN=3.0
@@ -47,6 +48,7 @@ ExecStart=/usr/bin/studio-effects-daemon \
     --passes ${PASSES} \
     --dim ${DIM} \
     --desat ${DESAT} \
+    --framing=${FRAMING} \
     --effect ${EFFECT} \
     --background ${BACKGROUND} \
     --mask-gain ${MASK_GAIN} \

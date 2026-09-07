@@ -128,6 +128,152 @@ pub fn box_blur(plane: &mut [u8], scratch: &mut [u8], w: usize, h: usize, stride
     }
 }
 
+/// Where the subject is, in mask coordinates, as (left, top, right, bottom).
+///
+/// Taken from the segmentation mask rather than a face detector: the mask is
+/// already a per-pixel map of the subject against everything else, so the
+/// subject's position costs nothing beyond a scan of 65k values. A second model
+/// would cost another inference and could disagree with the one doing the
+/// compositing.
+///
+/// Rows and columns need a minimum run of foreground to count, so a handful of
+/// stray confident pixels -- a hand at the frame edge, a patch of noise on a
+/// blank wall -- cannot drag the frame across the room.
+pub fn subject_box(mask: &[f32], threshold: f32, min_run: usize) -> Option<(usize, usize, usize, usize)> {
+    let mut cols = [0u16; NET];
+    let mut rows = [0u16; NET];
+    for y in 0..NET {
+        for x in 0..NET {
+            if mask[y * NET + x] >= threshold {
+                cols[x] += 1;
+                rows[y] += 1;
+            }
+        }
+    }
+
+    let span = |counts: &[u16; NET]| -> Option<(usize, usize)> {
+        let first = counts.iter().position(|&c| c as usize >= min_run)?;
+        let last = counts.iter().rposition(|&c| c as usize >= min_run)?;
+        Some((first, last))
+    };
+
+    let (left, right) = span(&cols)?;
+    let (top, bottom) = span(&rows)?;
+    Some((left, top, right, bottom))
+}
+
+/// Crop a rectangle out of a frame and scale it to fill the output, bilinearly.
+///
+/// The weights for a given rectangle are the same for every row and every
+/// frame, so they are handed in precomputed. Recomputing them per frame would
+/// cost more than the resample; the caller rebuilds them only when the crop
+/// actually moves.
+pub struct Resampler {
+    /// Per output column: the two source columns to mix, and the 0..=256 weight
+    /// toward the second. Both are stored rather than deriving the second as
+    /// `first + 1`, which walks off the end of the row at the last column.
+    x_idx: Vec<u32>,
+    x_next: Vec<u32>,
+    x_frac: Vec<u32>,
+    width: usize,
+}
+
+impl Resampler {
+    pub fn new(width: usize) -> Self {
+        Self {
+            x_idx: vec![0; width],
+            x_next: vec![0; width],
+            x_frac: vec![0; width],
+            width,
+        }
+    }
+
+    /// Point the tables at a source span. `scale` is how many source columns
+    /// each output column advances, in 16.16 fixed point.
+    pub fn aim(&mut self, src_left: f32, src_width: f32, limit: usize) {
+        for col in 0..self.width {
+            let sx = src_left + src_width * col as f32 / self.width as f32;
+            let sx = sx.max(0.0).min(limit as f32 - 1.0);
+            self.x_idx[col] = sx as u32;
+            self.x_next[col] = (sx as u32 + 1).min(limit as u32 - 1);
+            self.x_frac[col] = ((sx - sx.floor()) * 256.0) as u32;
+        }
+    }
+
+    /// The two source rows bracketing an output row, and the weight between.
+    #[inline]
+    fn rows_for(row: usize, height: usize, top: f32, span: f32, src_rows: usize) -> (usize, usize, u32) {
+        let sy = (top + span * row as f32 / height as f32)
+            .max(0.0)
+            .min(src_rows as f32 - 1.0);
+        let y0 = sy as usize;
+        (y0, (y0 + 1).min(src_rows - 1), ((sy - sy.floor()) * 256.0) as u32)
+    }
+
+    /// Resample a luma plane.
+    ///
+    /// Split from the chroma version rather than taking a byte count, because a
+    /// loop bound the compiler cannot see is a loop it will not unroll or
+    /// vectorise -- and this runs on every pixel of every frame.
+    pub fn luma(
+        &self,
+        src: &[u8],
+        dst: &mut [u8],
+        src_stride: usize,
+        dst_stride: usize,
+        height: usize,
+        top: f32,
+        span: f32,
+        src_rows: usize,
+    ) {
+        for row in 0..height {
+            let (y0, y1, yf) = Self::rows_for(row, height, top, span, src_rows);
+            let (r0, r1) = (y0 * src_stride, y1 * src_stride);
+            let out = &mut dst[row * dst_stride..row * dst_stride + self.width];
+
+            for (col, o) in out.iter_mut().enumerate() {
+                let (x0, x1) = (self.x_idx[col] as usize, self.x_next[col] as usize);
+                let xf = self.x_frac[col];
+                let top_row = u32::from(src[r0 + x0]) * (256 - xf) + u32::from(src[r0 + x1]) * xf;
+                let bot_row = u32::from(src[r1 + x0]) * (256 - xf) + u32::from(src[r1 + x1]) * xf;
+                *o = ((top_row * (256 - yf) + bot_row * yf) >> 16) as u8;
+            }
+        }
+    }
+
+    /// Resample an interleaved chroma plane, where U and V move together and
+    /// share one set of weights.
+    pub fn chroma(
+        &self,
+        src: &[u8],
+        dst: &mut [u8],
+        src_stride: usize,
+        dst_stride: usize,
+        height: usize,
+        top: f32,
+        span: f32,
+        src_rows: usize,
+    ) {
+        for row in 0..height {
+            let (y0, y1, yf) = Self::rows_for(row, height, top, span, src_rows);
+            let (r0, r1) = (y0 * src_stride, y1 * src_stride);
+            let out = row * dst_stride;
+
+            for col in 0..self.width {
+                let (x0, x1) = (self.x_idx[col] as usize * 2, self.x_next[col] as usize * 2);
+                let xf = self.x_frac[col];
+                for b in 0..2 {
+                    let t = u32::from(src[r0 + x0 + b]) * (256 - xf)
+                        + u32::from(src[r0 + x1 + b]) * xf;
+                    let d = u32::from(src[r1 + x0 + b]) * (256 - xf)
+                        + u32::from(src[r1 + x1 + b]) * xf;
+                    dst[out + col * 2 + b] = ((t * (256 - yf) + d * yf) >> 16) as u8;
+                }
+            }
+        }
+    }
+}
+
 /// Darken and drain colour from a background plane, in place.
 ///
 /// Both are done on the planes as they are: luma carries brightness, so dimming
@@ -349,6 +495,48 @@ mod tests {
         for row in (0..h).step_by(13) {
             for col in (0..w).step_by(17) {
                 assert_eq!(alpha_at(&up, col, row, h), 255, "at {col},{row}");
+            }
+        }
+    }
+
+    #[test]
+    fn subject_box_finds_a_blob_and_ignores_specks() {
+        let mut mask = vec![0.0f32; NET * NET];
+        // A block from (100,80) to (150,200).
+        for y in 80..=200 {
+            for x in 100..=150 {
+                mask[y * NET + x] = 1.0;
+            }
+        }
+        // A speck that must not widen the box.
+        mask[10 * NET + 5] = 1.0;
+
+        let (l, t, r, b) = subject_box(&mask, 0.5, 4).expect("a blob is present");
+        assert_eq!((l, t, r, b), (100, 80, 150, 200));
+    }
+
+    /// An empty mask must report nothing rather than a degenerate box: framing
+    /// on it would slam the crop to a corner the moment the subject steps out.
+    #[test]
+    fn subject_box_of_an_empty_mask_is_none() {
+        assert!(subject_box(&vec![0.0f32; NET * NET], 0.5, 4).is_none());
+    }
+
+    /// Resampling the whole frame at 1:1 must return the frame.
+    #[test]
+    fn resampling_the_full_frame_is_a_copy() {
+        let (w, h) = (64usize, 32usize);
+        let src: Vec<u8> = (0..w * h).map(|i| ((i * 5) % 251) as u8).collect();
+        let mut dst = vec![0u8; w * h];
+        let mut r = Resampler::new(w);
+        r.aim(0.0, w as f32, w);
+        r.luma(&src, &mut dst, w, w, h, 0.0, h as f32, h);
+        // Bilinear at exact sample points, so only the last row and column can
+        // differ by a rounding step where the clamp bites.
+        for y in 0..h - 1 {
+            for x in 0..w - 1 {
+                let (a, b) = (i32::from(dst[y * w + x]), i32::from(src[y * w + x]));
+                assert!((a - b).abs() <= 1, "at {x},{y}: {a} vs {b}");
             }
         }
     }

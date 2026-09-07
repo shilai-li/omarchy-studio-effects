@@ -109,6 +109,7 @@ BarWidget {
   function setEffect(effect) { root.send(Model.effectCommand(effect)) }
   function setBlur(radius) { root.send(Model.blurCommand(radius)) }
   function setParam(key, value) { root.send(Model.paramCommand(key, value)) }
+  function setToggle(key, on) { root.send(Model.toggleCommand(key, on)) }
 
   // Asked for only while the panel is open. Nothing is encoded for a picture
   // nobody is looking at, and the daemon deletes the last frame when it stops
@@ -148,6 +149,7 @@ BarWidget {
       passes: root.state.passes,
       dim: root.state.dim,
       desat: root.state.desat,
+      framing: root.state.framing,
       device: root.state.device,
       input: root.state.input,
       output: root.state.output,

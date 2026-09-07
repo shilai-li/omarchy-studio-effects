@@ -9,7 +9,7 @@
 use anyhow::{Context, Result};
 use std::sync::{Arc, Mutex};
 use studio_effects_daemon::control::{self, Effect, Fixed, Settings};
-use studio_effects_daemon::{background, device, mask, nv12, preview, segmenter};
+use studio_effects_daemon::{background, device, framing, mask, nv12, preview, segmenter};
 use clap::Parser;
 use gstreamer as gst;
 use gstreamer::prelude::*;
@@ -73,6 +73,25 @@ struct Args {
     #[arg(long, default_value_t = 0)]
     desat: u32,
 
+    /// Track the subject and keep them centred.
+    #[arg(long, default_value_t = false)]
+    framing: bool,
+
+    /// Furthest the framing may crop in, 1.0 to 3.0. The crop is scaled back to
+    /// the output size, so past this the picture is visibly soft.
+    #[arg(long, default_value_t = 1.6)]
+    framing_zoom: f32,
+
+    /// How far the subject may drift before the camera moves at all, as a
+    /// fraction of the crop. Zero makes the frame chase every twitch.
+    #[arg(long, default_value_t = 0.06)]
+    framing_dead_zone: f32,
+
+    /// How much of the current crop to keep each frame, 0 to 0.99. Higher is
+    /// slower and steadier.
+    #[arg(long, default_value_t = 0.92)]
+    framing_smoothing: f32,
+
     /// How hard to push the model's probabilities toward solid foreground or
     /// solid background. 1 uses them as-is, which is what made moving limbs
     /// look transparent.
@@ -117,20 +136,22 @@ struct Timings {
     infer: f64,
     blur: f64,
     blend: f64,
+    frame: f64,
 }
 
 impl Timings {
     fn report(&mut self, device: &str) {
         let n = self.frames as f64;
-        let total = self.prep + self.infer + self.blur + self.blend;
+        let total = self.prep + self.infer + self.blur + self.blend + self.frame;
         println!(
-            "{device:>3}  {:5.2} ms/frame  (prep {:4.2}  infer {:4.2}  blur {:4.2}  blend {:4.2})  \
+            "{device:>3}  {:5.2} ms/frame  (prep {:4.2}  infer {:4.2}  blur {:4.2}  blend {:4.2}  frame {:4.2})  \
              {:5.1}% of a 33 ms budget",
             total / n,
             self.prep / n,
             self.infer / n,
             self.blur / n,
             self.blend / n,
+            self.frame / n,
             100.0 * (total / n) / 33.3,
         );
         *self = Self::default();
@@ -274,6 +295,7 @@ fn main() -> Result<()> {
         passes: args.passes.clamp(1, 3),
         dim: args.dim.min(100),
         desat: args.desat.min(100),
+        framing: args.framing,
         resume: if args.effect == Effect::None {
             Effect::Blur
         } else {
@@ -304,6 +326,19 @@ fn main() -> Result<()> {
     let mut timings = Timings::default();
     let mut frame_no = 0u32;
     let mut preview: Option<preview::Preview> = None;
+
+    let mut framer = framing::Framing::new(
+        args.width,
+        args.height,
+        args.framing_zoom,
+        args.framing_dead_zone,
+        args.framing_smoothing,
+    );
+    let mut resampler = nv12::Resampler::new(w);
+    let mut resampler_uv = nv12::Resampler::new(w / 2);
+    let mut crop_y = vec![0u8; w * h];
+    let mut crop_uv = vec![0u8; w * h / 2];
+    let mut aimed: Option<framing::Rect> = None;
 
     // A frame left by a daemon that was killed rather than shut down is a
     // picture of somebody's camera sitting in the runtime directory. Drop
@@ -341,9 +376,9 @@ fn main() -> Result<()> {
         // Read once per frame: the socket thread may change these at any point,
         // and a frame that blurred with one radius and blended with another
         // would tear.
-        let (effect, blur_radius, passes, dim, desat, want_preview) = {
+        let (effect, blur_radius, passes, dim, desat, want_framing, want_preview) = {
             let s = settings.lock().expect("settings mutex poisoned");
-            (s.effect, s.blur, s.passes, s.dim, s.desat, s.preview)
+            (s.effect, s.blur, s.passes, s.dim, s.desat, s.framing, s.preview)
         };
 
         let t = Instant::now();
@@ -393,6 +428,42 @@ fn main() -> Result<()> {
             }
             timings.blend += t.elapsed().as_secs_f64() * 1e3;
         }
+
+        // Framing crops the finished picture and scales it back up. Done last
+        // so the segmentation and the composite always see the whole frame: a
+        // subject who steps outside the crop still has to be found, or the
+        // camera could never follow them back.
+        let t = Instant::now();
+        if want_framing {
+            let rect = framer.update(&mask);
+            if let Some(r) = rect {
+                let dst_ref = dst.get_mut().context("output buffer was not writable")?;
+                let mut frame = gst_video::VideoFrameRef::from_buffer_ref_writable(dst_ref, &info)?;
+                let [y_out, uv_out, _, _] = frame.planes_data_mut();
+
+                // The weights only change when the crop does, and the crop is
+                // deliberately still most of the time.
+                if aimed != Some(r) {
+                    resampler.aim(r.x, r.w, w);
+                    resampler_uv.aim(r.x / 2.0, r.w / 2.0, w / 2);
+                    aimed = Some(r);
+                }
+
+                resampler.luma(y_out, &mut crop_y, y_stride, w, h, r.y, r.h, h);
+                resampler_uv.chroma(
+                    uv_out, &mut crop_uv, uv_stride, w, h / 2, r.y / 2.0, r.h / 2.0, h / 2,
+                );
+                for row in 0..h {
+                    y_out[row * y_stride..row * y_stride + w]
+                        .copy_from_slice(&crop_y[row * w..(row + 1) * w]);
+                }
+                for row in 0..h / 2 {
+                    uv_out[row * uv_stride..row * uv_stride + w]
+                        .copy_from_slice(&crop_uv[row * w..(row + 1) * w]);
+                }
+            }
+        }
+        timings.frame += t.elapsed().as_secs_f64() * 1e3;
 
         drop(in_frame);
 

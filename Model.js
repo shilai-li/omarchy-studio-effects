@@ -75,15 +75,37 @@ var PARAMS = [
     { key: "desat",  label: "Desaturate", min: 0, max: 100, step: 10, effects: ["blur", "replace"] }
 ];
 
-// A setting counts as supported when the daemon reports a value for it.
+// A setting counts as supported when the daemon reports a value for it: a
+// number for a slider, a boolean for a toggle.
 function supportedParams(parsed) {
     var found = {};
-    for (var i = 0; i < PARAMS.length; i++) {
-        var key = PARAMS[i].key;
-        found[key] = parsed !== null && typeof parsed === "object"
-            && typeof parsed[key] === "number";
-    }
+    var ok = parsed !== null && typeof parsed === "object";
+    for (var i = 0; i < PARAMS.length; i++)
+        found[PARAMS[i].key] = ok && typeof parsed[PARAMS[i].key] === "number";
+    for (var j = 0; j < TOGGLES.length; j++)
+        found[TOGGLES[j].key] = ok && typeof parsed[TOGGLES[j].key] === "boolean";
     return found;
+}
+
+// Settings that are on or off rather than a number. Kept apart from PARAMS
+// because the panel treats them differently: enter flips a toggle, where left
+// and right move a slider.
+var TOGGLES = [
+    { key: "framing", label: "Auto framing" }
+];
+
+function toggleFor(key) {
+    for (var i = 0; i < TOGGLES.length; i++)
+        if (TOGGLES[i].key === key) return TOGGLES[i];
+    return null;
+}
+
+function toggleCommand(key, on) {
+    return toggleFor(key) ? command([key, on ? "on" : "off"]) : null;
+}
+
+function toggleValue(state, key) {
+    return !!(state && state[key] === true);
 }
 
 function paramFor(key) {
@@ -117,8 +139,17 @@ function panelRows(state) {
     for (var i = 0; i < effects.length; i++)
         rows.push({ kind: "effect", effect: effects[i], key: "" });
 
-    var current = state ? state.effect : "none";
     var supports = state && state.supports ? state.supports : {};
+
+    // Framing is independent of the background effect -- keeping someone
+    // centred is worth having with no blur at all -- so it sits with the
+    // effects rather than under them.
+    for (var t = 0; t < TOGGLES.length; t++) {
+        if (!supports[TOGGLES[t].key]) continue;
+        rows.push({ kind: "toggle", effect: "", key: TOGGLES[t].key });
+    }
+
+    var current = state ? state.effect : "none";
     for (var j = 0; j < PARAMS.length; j++) {
         if (PARAMS[j].effects.indexOf(current) === -1) continue;
         if (!supports[PARAMS[j].key]) continue;
@@ -158,6 +189,7 @@ function unknownState(reason) {
         passes: 1,
         dim: 0,
         desat: 0,
+        framing: false,
         supports: supportedParams(null),
         preview: false,
         previewPath: "",
@@ -205,6 +237,7 @@ function parseStatus(text) {
         output: typeof parsed.output === "string" ? parsed.output : "",
         background: parsed.background === true,
         preview: parsed.preview === true,
+        framing: parsed.framing === true,
         // Taken from the daemon rather than rebuilt here, so the two cannot
         // disagree about where the frames are.
         previewPath: typeof parsed.previewPath === "string" ? parsed.previewPath : "",
@@ -321,6 +354,10 @@ if (typeof module !== "undefined" && module.exports) {
         paramCommand: paramCommand,
         paramValue: paramValue,
         supportedParams: supportedParams,
+        TOGGLES: TOGGLES,
+        toggleFor: toggleFor,
+        toggleCommand: toggleCommand,
+        toggleValue: toggleValue,
         panelRows: panelRows,
         stepParam: stepParam,
         indexOfEffect: indexOfEffect,

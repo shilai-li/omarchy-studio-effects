@@ -49,6 +49,8 @@ pub struct Settings {
     pub dim: u32,
     /// How much colour to drain from the background, 0..=100.
     pub desat: u32,
+    /// Track the subject and keep them centred.
+    pub framing: bool,
     /// What `toggle` should return to. Without this, turning effects off and on
     /// again would silently demote a replaced background to a blur.
     pub resume: Effect,
@@ -86,12 +88,13 @@ fn escape(text: &str) -> String {
 
 fn json(settings: &Settings, fixed: &Fixed, error: Option<&str>) -> String {
     let mut out = format!(
-        r#"{{"effect":"{}","blur":{},"passes":{},"dim":{},"desat":{},"device":"{}","input":"{}","output":"{}","width":{},"height":{},"background":{},"preview":{},"previewPath":"{}""#,
+        r#"{{"effect":"{}","blur":{},"passes":{},"dim":{},"desat":{},"framing":{},"device":"{}","input":"{}","output":"{}","width":{},"height":{},"background":{},"preview":{},"previewPath":"{}""#,
         settings.effect.as_str(),
         settings.blur,
         settings.passes,
         settings.dim,
         settings.desat,
+        settings.framing,
         fixed.device,
         fixed.input,
         fixed.output,
@@ -150,6 +153,11 @@ fn handle(line: &str, settings: &Mutex<Settings>, fixed: &Fixed) -> String {
             Some(n) if (1..=3).contains(&n) => s.passes = n,
             _ => error = Some("usage: passes <1-3>"),
         },
+        "framing" => match arg {
+            Some("on") => s.framing = true,
+            Some("off") | None => s.framing = false,
+            _ => error = Some("usage: framing on|off"),
+        },
         "dim" => match arg.and_then(|a| a.parse::<u32>().ok()) {
             Some(n) if n <= 100 => s.dim = n,
             _ => error = Some("usage: dim <0-100>"),
@@ -158,7 +166,7 @@ fn handle(line: &str, settings: &Mutex<Settings>, fixed: &Fixed) -> String {
             Some(n) if n <= 100 => s.desat = n,
             _ => error = Some("usage: desat <0-100>"),
         },
-        _ => error = Some("unknown command; try status, effect, toggle, preview, blur, passes, dim or desat"),
+        _ => error = Some("unknown command; try status, effect, toggle, preview, framing, blur, passes, dim or desat"),
     }
 
     json(&s, fixed, error)
@@ -233,6 +241,7 @@ mod tests {
             passes: 2,
             dim: 0,
             desat: 0,
+            framing: false,
             resume: Effect::Blur,
             has_background,
             preview: false,
@@ -284,6 +293,14 @@ mod tests {
         assert!(handle("passes 3", &s, &fixed()).contains(r#""passes":3"#));
         assert!(handle("dim 40", &s, &fixed()).contains(r#""dim":40"#));
         assert!(handle("desat 100", &s, &fixed()).contains(r#""desat":100"#));
+    }
+
+    #[test]
+    fn framing_toggles_and_a_bare_word_turns_it_off() {
+        let s = settings(false);
+        assert!(handle("status", &s, &fixed()).contains(r#""framing":false"#));
+        assert!(handle("framing on", &s, &fixed()).contains(r#""framing":true"#));
+        assert!(handle("framing", &s, &fixed()).contains(r#""framing":false"#));
     }
 
     #[test]
