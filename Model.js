@@ -64,6 +64,62 @@ function blurCommand(radius) {
     return command(["blur", String(clampBlur(radius))]);
 }
 
+// Every adjustable setting, in one place, so the panel does not have to know
+// the range of anything and the daemon is never sent a value it will refuse.
+// Ranges here mirror the daemon's; it clamps too, and disagreeing shows up as a
+// refusal rather than as a wrong picture.
+var PARAMS = [
+    { key: "blur",   label: "Blur",       min: 0, max: 200, step: 6,  effects: ["blur"] },
+    { key: "passes", label: "Smoothness", min: 1, max: 3,   step: 1,  effects: ["blur"] },
+    { key: "dim",    label: "Darken",     min: 0, max: 100, step: 10, effects: ["blur", "replace"] },
+    { key: "desat",  label: "Desaturate", min: 0, max: 100, step: 10, effects: ["blur", "replace"] }
+];
+
+function paramFor(key) {
+    for (var i = 0; i < PARAMS.length; i++)
+        if (PARAMS[i].key === key) return PARAMS[i];
+    return null;
+}
+
+function clampParam(key, value) {
+    var p = paramFor(key);
+    if (!p) return 0;
+    var n = Math.round(Number(value));
+    if (!isFinite(n)) return p.min;
+    return Math.max(p.min, Math.min(p.max, n));
+}
+
+function paramCommand(key, value) {
+    return paramFor(key) ? command([key, String(clampParam(key, value))]) : null;
+}
+
+function paramValue(state, key) {
+    return state && typeof state[key] === "number" ? state[key] : clampParam(key, 0);
+}
+
+// The rows the panel shows: the effects, then the settings that apply to
+// whichever effect is on. A slider for something the current effect ignores is
+// worse than no slider -- it invites a change that does nothing visible.
+function panelRows(state) {
+    var rows = [];
+    var effects = availableEffects(state);
+    for (var i = 0; i < effects.length; i++)
+        rows.push({ kind: "effect", effect: effects[i], key: "" });
+
+    var current = state ? state.effect : "none";
+    for (var j = 0; j < PARAMS.length; j++) {
+        if (PARAMS[j].effects.indexOf(current) === -1) continue;
+        rows.push({ kind: "param", effect: "", key: PARAMS[j].key });
+    }
+    return rows;
+}
+
+function stepParam(state, key, direction) {
+    var p = paramFor(key);
+    if (!p) return 0;
+    return clampParam(key, paramValue(state, key) + direction * p.step);
+}
+
 function isEffect(effect) {
     return EFFECTS.indexOf(effect) !== -1;
 }
@@ -180,10 +236,12 @@ function availableEffects(state) {
     return usable;
 }
 
-function indexOfEffect(state, list) {
+// Where the cursor should sit when the panel opens: on the effect that is on.
+function indexOfEffect(state, rows) {
     var current = state ? state.effect : "none";
-    var at = list.indexOf(current);
-    return at === -1 ? 0 : at;
+    for (var i = 0; i < rows.length; i++)
+        if (rows[i].kind === "effect" && rows[i].effect === current) return i;
+    return 0;
 }
 
 function stepBlur(state, direction) {
@@ -227,6 +285,13 @@ if (typeof module !== "undefined" && module.exports) {
         labelFor: labelFor,
         tooltipFor: tooltipFor,
         availableEffects: availableEffects,
+        PARAMS: PARAMS,
+        paramFor: paramFor,
+        clampParam: clampParam,
+        paramCommand: paramCommand,
+        paramValue: paramValue,
+        panelRows: panelRows,
+        stepParam: stepParam,
         indexOfEffect: indexOfEffect,
         stepBlur: stepBlur
     }

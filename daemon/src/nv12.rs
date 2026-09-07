@@ -128,6 +128,48 @@ pub fn box_blur(plane: &mut [u8], scratch: &mut [u8], w: usize, h: usize, stride
     }
 }
 
+/// Darken and drain colour from a background plane, in place.
+///
+/// Both are done on the planes as they are: luma carries brightness, so dimming
+/// is a scale on Y alone, and chroma is stored as a signed offset from 128, so
+/// desaturating is pulling UV toward that midpoint. Neither needs the frame in
+/// RGB, which is the whole reason they cost almost nothing.
+///
+/// `dim` and `desat` are 0..=100. They apply to whatever is behind the subject,
+/// blurred or replaced, and never to the subject: this runs before the blend,
+/// on the background only.
+pub fn tint(
+    y_plane: &mut [u8],
+    uv_plane: &mut [u8],
+    w: usize,
+    h: usize,
+    y_stride: usize,
+    uv_stride: usize,
+    dim: u32,
+    desat: u32,
+) {
+    if dim > 0 {
+        // 8-bit fixed point, rounded like the blur's average so a dim of 0
+        // through this path would leave the plane untouched.
+        let keep = (100 - dim.min(100)) * 256 / 100;
+        for row in 0..h {
+            for v in &mut y_plane[row * y_stride..row * y_stride + w] {
+                *v = ((u32::from(*v) * keep + 128) >> 8) as u8;
+            }
+        }
+    }
+
+    if desat > 0 {
+        let keep = (100 - desat.min(100)) as i32 * 256 / 100;
+        for row in 0..h / 2 {
+            for v in &mut uv_plane[row * uv_stride..row * uv_stride + w] {
+                let centred = i32::from(*v) - 128;
+                *v = (128 + ((centred * keep + 128) >> 8)).clamp(0, 255) as u8;
+            }
+        }
+    }
+}
+
 /// Upscales the model's 256x256 mask to frame width, separably.
 ///
 /// The naive version sampled the mask bilinearly per pixel: four float loads and
@@ -309,6 +351,42 @@ mod tests {
                 assert_eq!(alpha_at(&up, col, row, h), 255, "at {col},{row}");
             }
         }
+    }
+
+    /// Neither knob may touch anything at zero. A background that shifts a
+    /// level the moment a slider exists, without being moved, is the kind of
+    /// thing nobody tracks down later.
+    #[test]
+    fn tint_at_zero_is_a_no_op() {
+        let (w, h, ys, uvs) = (32, 16, 40, 40);
+        let mut y: Vec<u8> = (0..ys * h).map(|i| (i % 256) as u8).collect();
+        let mut uv: Vec<u8> = (0..uvs * h / 2).map(|i| ((i * 7) % 256) as u8).collect();
+        let (y0, uv0) = (y.clone(), uv.clone());
+        tint(&mut y, &mut uv, w, h, ys, uvs, 0, 0);
+        assert_eq!(y, y0, "dim 0 changed luma");
+        assert_eq!(uv, uv0, "desat 0 changed chroma");
+    }
+
+    #[test]
+    fn dim_darkens_luma_and_leaves_colour_alone() {
+        let (w, h, ys, uvs) = (16, 8, 16, 16);
+        let mut y = vec![200u8; ys * h];
+        let mut uv = vec![200u8; uvs * h / 2];
+        tint(&mut y, &mut uv, w, h, ys, uvs, 50, 0);
+        assert_eq!(y[0], 100, "half brightness");
+        assert_eq!(uv[0], 200, "chroma must not move when only dimming");
+    }
+
+    /// Full desaturation is grey, which is chroma at the midpoint -- not zero.
+    /// Writing 0 here would tint the whole background green.
+    #[test]
+    fn full_desaturation_lands_on_neutral_grey() {
+        let (w, h, ys, uvs) = (16, 8, 16, 16);
+        let mut y = vec![120u8; ys * h];
+        let mut uv = vec![30u8; uvs * h / 2];
+        tint(&mut y, &mut uv, w, h, ys, uvs, 0, 100);
+        assert_eq!(uv[0], 128, "grey is 128, not 0");
+        assert_eq!(y[0], 120, "luma must not move when only desaturating");
     }
 
     /// Blurring a flat plane must not change it -- the running sums, the edge

@@ -32,7 +32,9 @@ Panel {
   readonly property var state: host ? host.state : Model.notRunningState()
   readonly property bool running: state.running === true
   readonly property bool switching: host ? host.switching === true : false
-  readonly property var rows: Model.availableEffects(root.state)
+  readonly property var rows: Model.panelRows(root.state)
+  readonly property var currentRow: selectedIndex >= 0 && selectedIndex < rows.length
+    ? rows[selectedIndex] : null
 
   property int selectedIndex: 0
   property bool cursorActive: false
@@ -108,17 +110,22 @@ Panel {
   // ---- Actions. Choosing an effect leaves the panel up: the point is to see
   //      the change land, and the next thing a user does is often adjust it.
   function chooseSelected() {
-    if (!root.host || root.selectedIndex >= root.rows.length) return
-    root.host.setEffect(root.rows[root.selectedIndex])
+    if (!root.host || !root.currentRow) return
+    if (root.currentRow.kind === "effect") root.host.setEffect(root.currentRow.effect)
+  }
+
+  // Left and right adjust whatever row the cursor is on, and nothing at all on
+  // an effect row. Having them fall back to some other setting would mean the
+  // same keypress did different things depending on where you were, without
+  // saying which.
+  function adjustSelected(direction) {
+    if (!root.host || !root.currentRow || root.currentRow.kind !== "param") return
+    root.host.setParam(root.currentRow.key,
+                       Model.stepParam(root.state, root.currentRow.key, direction))
   }
 
   function togglePower() {
     if (root.host) root.host.toggleService()
-  }
-
-  function stepBlur(direction) {
-    if (!root.host) return
-    root.host.stepBlur(direction)
   }
 
   function handleTextKey(text) {
@@ -144,15 +151,19 @@ Panel {
       root.selectedIndex = Math.max(0, root.rows.length - 1)
   }
 
-  // ---- One row: a marker for the effect that is on, and its name.
+  // ---- One row. Either an effect to choose or a setting to adjust; they share
+  //      a component so the cursor walks one list rather than two.
   component EffectRow: CursorSurface {
     id: row
 
     required property int index
     required property var modelData
 
-    readonly property string effect: String(modelData)
-    readonly property bool isCurrent: root.running && root.state.effect === effect
+    readonly property bool isParam: modelData && modelData.kind === "param"
+    readonly property string effect: modelData && modelData.effect ? modelData.effect : ""
+    readonly property string paramKey: modelData && modelData.key ? modelData.key : ""
+    readonly property var spec: row.isParam ? Model.paramFor(row.paramKey) : null
+    readonly property bool isCurrent: !row.isParam && root.running && root.state.effect === effect
 
     width: parent ? parent.width : 0
     height: root.rowHeight
@@ -172,9 +183,12 @@ Panel {
         root.selectedIndex = row.index
       }
 
-      onClicked: {
+      // A setting is adjusted, not chosen, so clicking one of those halves
+      // steps it rather than doing nothing.
+      onClicked: function (mouse) {
         root.selectedIndex = row.index
-        root.chooseSelected()
+        if (row.isParam) root.adjustSelected(mouse.x > row.width / 2 ? 1 : -1)
+        else root.chooseSelected()
       }
     }
 
@@ -192,19 +206,37 @@ Panel {
     }
 
     Text {
+      id: rowLabel
       anchors.left: marker.right
       anchors.leftMargin: Style.space(4)
-      anchors.right: parent.right
-      anchors.rightMargin: Style.space(8)
       anchors.verticalCenter: parent.verticalCenter
       textFormat: Text.PlainText
-      text: row.effect === "none" ? "Off"
+      text: row.isParam ? (row.spec ? row.spec.label : row.paramKey)
+          : row.effect === "none" ? "Off"
           : row.effect === "blur" ? "Blur background"
           : "Replace background"
       color: root.contentForeground
       font.family: root.contentFontFamily
       font.pixelSize: Style.font.body
       elide: Text.ElideRight
+    }
+
+    // The value, with arrows on the selected row so it is discoverable that
+    // this one is adjusted rather than chosen.
+    Text {
+      anchors.right: parent.right
+      anchors.rightMargin: Style.space(8)
+      anchors.verticalCenter: parent.verticalCenter
+      visible: row.isParam
+      textFormat: Text.PlainText
+      text: {
+        if (!row.isParam) return ""
+        var v = Model.paramValue(root.state, row.paramKey)
+        return row.hasCursor ? "\u2039 " + v + " \u203a" : String(v)
+      }
+      color: row.hasCursor ? root.accentColor : root.dim
+      font.family: root.contentFontFamily
+      font.pixelSize: Style.font.body
     }
   }
 
@@ -230,7 +262,7 @@ Panel {
       // unlike a plain list they are bound rather than left alone.
       onMoveRequested: function(dx, dy) {
         if (dy !== 0) root.moveCursor(dy)
-        else if (dx !== 0) root.stepBlur(dx > 0 ? 1 : -1)
+        else if (dx !== 0) root.adjustSelected(dx > 0 ? 1 : -1)
       }
 
       Column {
@@ -483,9 +515,10 @@ Panel {
         Text {
           width: parent.width
           textFormat: Text.PlainText
-          text: root.running
-              ? "↑↓ move   enter choose   ←→ blur   p off   esc close"
-              : "p turn on   esc close"
+          text: !root.running ? "p turn on   esc close"
+              : root.currentRow && root.currentRow.kind === "param"
+              ? "↑↓ move   ←→ adjust   p off   esc close"
+              : "↑↓ move   enter choose   p off   esc close"
           color: root.dim
           font.family: root.contentFontFamily
           font.pixelSize: Style.font.caption

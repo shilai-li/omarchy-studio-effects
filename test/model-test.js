@@ -117,6 +117,54 @@ check("a reply with no preview fields never claims a path", () => {
   eq(M.notRunningState().previewPath, "", "previewPath when stopped")
 })
 
+// ---- Adjustable settings.
+
+check("only settings the current effect uses are offered", () => {
+  const kinds = st => M.panelRows(st).map(r => r.kind + ":" + (r.effect || r.key))
+  // Nothing to adjust when effects are off.
+  eq(kinds({ effect: "none", background: false }), ["effect:none", "effect:blur"])
+  // Replace has no blur to soften, so no blur or smoothness rows.
+  const rep = kinds({ effect: "replace", background: true })
+  ok(rep.indexOf("param:blur") === -1, "replace should not offer blur: " + rep)
+  ok(rep.indexOf("param:dim") !== -1, "replace should offer darken: " + rep)
+  // Blur offers all four.
+  const bl = kinds({ effect: "blur", background: false })
+  for (const k of ["param:blur", "param:passes", "param:dim", "param:desat"])
+    ok(bl.indexOf(k) !== -1, k + " missing from " + bl)
+})
+
+check("every setting is clamped to the daemon's range before being sent", () => {
+  eq(M.paramCommand("passes", 9), [M.BINARY, "passes", "3"])
+  eq(M.paramCommand("passes", 0), [M.BINARY, "passes", "1"])
+  eq(M.paramCommand("dim", 500), [M.BINARY, "dim", "100"])
+  eq(M.paramCommand("desat", -20), [M.BINARY, "desat", "0"])
+  eq(M.paramCommand("blur", 9999), [M.BINARY, "blur", "200"])
+})
+
+check("an unknown setting is refused here, not sent", () => {
+  eq(M.paramCommand("banana", 1), null)
+  eq(M.paramCommand("effect", "none"), null)
+})
+
+check("stepping stays inside the range and moves by the right amount", () => {
+  eq(M.stepParam({ passes: 2 }, "passes", 1), 3)
+  eq(M.stepParam({ passes: 3 }, "passes", 1), 3, "clamped at the top")
+  eq(M.stepParam({ dim: 0 }, "dim", -1), 0, "clamped at the bottom")
+  eq(M.stepParam({ dim: 50 }, "dim", 1), 60)
+})
+
+check("a reply missing a setting reads as its minimum, never as garbage", () => {
+  const s = M.parseStatus('{"effect":"blur"}')
+  eq(M.paramValue(s, "passes"), 1, "passes")
+  eq(M.paramValue(s, "dim"), 0, "dim")
+})
+
+check("the cursor opens on the effect that is on, counting param rows", () => {
+  const st = { effect: "blur", background: false }
+  const rows = M.panelRows(st)
+  eq(rows[M.indexOfEffect(st, rows)].effect, "blur")
+})
+
 // ---- What the bar shows.
 
 check("the glyph distinguishes off, blurred and replaced", () => {
@@ -140,9 +188,11 @@ check("replace is offered only when an image is actually loaded", () => {
 })
 
 check("the cursor lands on the current effect, and survives one that is hidden", () => {
-  const list = M.availableEffects({ background: false })
-  eq(M.indexOfEffect({ effect: "blur" }, list), 1)
-  eq(M.indexOfEffect({ effect: "replace" }, list), 0, "hidden effect falls back to the first row")
+  const rows = M.panelRows({ effect: "blur", background: false })
+  eq(rows[M.indexOfEffect({ effect: "blur" }, rows)].effect, "blur")
+  // An effect not on offer (replace with no image) must not point off the list.
+  const hidden = M.panelRows({ effect: "replace", background: false })
+  ok(M.indexOfEffect({ effect: "replace" }, hidden) < hidden.length, "index must stay in range")
 })
 
 check("stepping blur stays inside the daemon's range", () => {

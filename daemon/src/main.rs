@@ -59,6 +59,20 @@ struct Args {
     #[arg(long, default_value_t = 12)]
     blur: usize,
 
+    /// Repeats of the box blur, 1 to 3. One is cheapest and looks boxy against
+    /// a hard edge; two is close enough to a Gaussian for a background.
+    #[arg(long, default_value_t = 2)]
+    passes: usize,
+
+    /// Darken the background, 0 to 100. Makes the subject stand out without
+    /// touching them.
+    #[arg(long, default_value_t = 0)]
+    dim: u32,
+
+    /// Drain colour from the background, 0 to 100.
+    #[arg(long, default_value_t = 0)]
+    desat: u32,
+
     /// How hard to push the model's probabilities toward solid foreground or
     /// solid background. 1 uses them as-is, which is what made moving limbs
     /// look transparent.
@@ -257,6 +271,9 @@ fn main() -> Result<()> {
     let settings = Arc::new(Mutex::new(Settings {
         effect: args.effect,
         blur: args.blur,
+        passes: args.passes.clamp(1, 3),
+        dim: args.dim.min(100),
+        desat: args.desat.min(100),
         resume: if args.effect == Effect::None {
             Effect::Blur
         } else {
@@ -324,9 +341,9 @@ fn main() -> Result<()> {
         // Read once per frame: the socket thread may change these at any point,
         // and a frame that blurred with one radius and blended with another
         // would tear.
-        let (effect, blur_radius, want_preview) = {
+        let (effect, blur_radius, passes, dim, desat, want_preview) = {
             let s = settings.lock().expect("settings mutex poisoned");
-            (s.effect, s.blur, s.preview)
+            (s.effect, s.blur, s.passes, s.dim, s.desat, s.preview)
         };
 
         let t = Instant::now();
@@ -350,10 +367,21 @@ fn main() -> Result<()> {
                     }
                 }
                 Effect::Blur => {
-                    nv12::box_blur(y_out, &mut scratch, w, h, y_stride, blur_radius);
-                    nv12::box_blur(uv_out, &mut scratch, w, h / 2, uv_stride, blur_radius / 2);
+                    // Repeated box blur converges on a Gaussian. Two passes is
+                    // the point where the boxiness stops being visible against
+                    // a hard edge, which is why it is the default.
+                    for _ in 0..passes {
+                        nv12::box_blur(y_out, &mut scratch, w, h, y_stride, blur_radius);
+                        nv12::box_blur(uv_out, &mut scratch, w, h / 2, uv_stride, blur_radius / 2);
+                    }
                 }
                 Effect::None => {}
+            }
+
+            // On the background only, and before the blend, so the subject is
+            // never dimmed or drained along with what is behind them.
+            if effect != Effect::None {
+                nv12::tint(y_out, uv_out, w, h, y_stride, uv_stride, dim, desat);
             }
             timings.blur += t.elapsed().as_secs_f64() * 1e3;
 

@@ -16,6 +16,9 @@ usage: studio-effects [command]
   effect none|blur|replace     choose an effect
   toggle                       turn effects off, or back on to the last one
   blur <0-200>                 background blur radius
+  passes <1-3>                 blur repeats; 1 is boxy, 2 looks Gaussian
+  dim <0-100>                  darken the background
+  desat <0-100>                drain colour from the background
   preview on|off               publish preview frames for the bar widget
 
 With no command, prints status. Every command answers with the daemon's full

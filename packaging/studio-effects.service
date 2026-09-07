@@ -27,6 +27,9 @@ Environment=INPUT=/dev/video0
 Environment=WIDTH=1280
 Environment=HEIGHT=720
 Environment=BLUR=12
+Environment=PASSES=2
+Environment=DIM=0
+Environment=DESAT=0
 Environment=EFFECT=blur
 Environment=BACKGROUND=
 Environment=MASK_GAIN=3.0
@@ -41,6 +44,9 @@ ExecStart=/usr/bin/studio-effects-daemon \
     --width ${WIDTH} \
     --height ${HEIGHT} \
     --blur ${BLUR} \
+    --passes ${PASSES} \
+    --dim ${DIM} \
+    --desat ${DESAT} \
     --effect ${EFFECT} \
     --background ${BACKGROUND} \
     --mask-gain ${MASK_GAIN} \

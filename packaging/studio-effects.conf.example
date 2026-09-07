@@ -10,8 +10,19 @@ INPUT=/dev/video0
 WIDTH=1280
 HEIGHT=720
 
-# Background blur radius, in pixels at the frame's own scale.
+# Background blur radius, in pixels at the frame's own scale. Adjustable while
+# running from the bar panel, or `studio-effects blur 40`.
 BLUR=12
+
+# Repeats of the blur, 1 to 3. One is cheapest and shows visible streaking
+# against hard edges; two is close enough to a Gaussian and is what you want.
+PASSES=2
+
+# Darken the background, 0 to 100. Makes you stand out without touching you.
+DIM=0
+
+# Drain colour from the background, 0 to 100.
+DESAT=0
 
 # The starting effect. To change it while the daemon runs -- which is what you
 # want on a call, since a restart drops the camera for a second -- use the

@@ -42,6 +42,13 @@ impl Effect {
 pub struct Settings {
     pub effect: Effect,
     pub blur: usize,
+    /// Repeats of the box blur. One is boxy on hard edges; two or three
+    /// approximate a Gaussian, at a cost that scales with them.
+    pub passes: usize,
+    /// How much to darken the background, 0..=100.
+    pub dim: u32,
+    /// How much colour to drain from the background, 0..=100.
+    pub desat: u32,
     /// What `toggle` should return to. Without this, turning effects off and on
     /// again would silently demote a replaced background to a blur.
     pub resume: Effect,
@@ -79,9 +86,12 @@ fn escape(text: &str) -> String {
 
 fn json(settings: &Settings, fixed: &Fixed, error: Option<&str>) -> String {
     let mut out = format!(
-        r#"{{"effect":"{}","blur":{},"device":"{}","input":"{}","output":"{}","width":{},"height":{},"background":{},"preview":{},"previewPath":"{}""#,
+        r#"{{"effect":"{}","blur":{},"passes":{},"dim":{},"desat":{},"device":"{}","input":"{}","output":"{}","width":{},"height":{},"background":{},"preview":{},"previewPath":"{}""#,
         settings.effect.as_str(),
         settings.blur,
+        settings.passes,
+        settings.dim,
+        settings.desat,
         fixed.device,
         fixed.input,
         fixed.output,
@@ -136,7 +146,19 @@ fn handle(line: &str, settings: &Mutex<Settings>, fixed: &Fixed) -> String {
             Some(n) if n <= 200 => s.blur = n,
             _ => error = Some("usage: blur <0-200>"),
         },
-        _ => error = Some("unknown command; try status, effect, toggle, blur or preview"),
+        "passes" => match arg.and_then(|a| a.parse::<usize>().ok()) {
+            Some(n) if (1..=3).contains(&n) => s.passes = n,
+            _ => error = Some("usage: passes <1-3>"),
+        },
+        "dim" => match arg.and_then(|a| a.parse::<u32>().ok()) {
+            Some(n) if n <= 100 => s.dim = n,
+            _ => error = Some("usage: dim <0-100>"),
+        },
+        "desat" => match arg.and_then(|a| a.parse::<u32>().ok()) {
+            Some(n) if n <= 100 => s.desat = n,
+            _ => error = Some("usage: desat <0-100>"),
+        },
+        _ => error = Some("unknown command; try status, effect, toggle, preview, blur, passes, dim or desat"),
     }
 
     json(&s, fixed, error)
@@ -208,6 +230,9 @@ mod tests {
         Mutex::new(Settings {
             effect: Effect::Blur,
             blur: 12,
+            passes: 2,
+            dim: 0,
+            desat: 0,
             resume: Effect::Blur,
             has_background,
             preview: false,
@@ -238,6 +263,27 @@ mod tests {
         let out = handle("effect replace", &s, &fixed());
         assert!(out.contains(r#""error""#), "{out}");
         assert!(out.contains(r#""effect":"blur""#), "{out}");
+    }
+
+    /// Every knob is clamped at the socket, so a widget cannot put the daemon
+    /// somewhere the daemon does not accept.
+    #[test]
+    fn out_of_range_settings_are_refused_not_clamped_silently() {
+        let s = settings(false);
+        for bad in ["passes 0", "passes 9", "dim 101", "desat 500", "dim -1"] {
+            let out = handle(bad, &s, &fixed());
+            assert!(out.contains(r#""error""#), "{bad} should be refused: {out}");
+        }
+        assert!(handle("status", &s, &fixed()).contains(r#""passes":2"#));
+        assert!(handle("status", &s, &fixed()).contains(r#""dim":0"#));
+    }
+
+    #[test]
+    fn the_new_knobs_are_settable() {
+        let s = settings(false);
+        assert!(handle("passes 3", &s, &fixed()).contains(r#""passes":3"#));
+        assert!(handle("dim 40", &s, &fixed()).contains(r#""dim":40"#));
+        assert!(handle("desat 100", &s, &fixed()).contains(r#""desat":100"#));
     }
 
     #[test]
