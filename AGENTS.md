@@ -369,7 +369,11 @@ cd daemon && cargo test             # reference tests for the hot loops and the 
 omarchy plugin validate .           # manifest + entry points
 bash test/model-test.sh             # Model.js under plain node, no compositor
 
-cp -r . ~/.config/omarchy/plugins/shilai_li.studio-effects   # no symlinks; validator rejects them
+# Reinstall AND restart, in that order. Reinstalling alone leaves the running
+# shell on the cached Model.js, which fails as a widget that does nothing rather
+# than as an error -- see below.
+git archive HEAD | tar -x -C ~/.config/omarchy/plugins/shilai_li.studio-effects
+omarchy-restart-shell
 QT_FORCE_STDERR_LOGGING=1 /usr/lib/qt6/bin/qmllint -I /usr/share/omarchy/shell BarWidget.qml
 ```
 
@@ -382,6 +386,21 @@ else works; `Model.js`'s imported copy is cached the same way. Both need
 `omarchy-restart-shell`. The panel changing while the IPC does not is exactly
 what makes this hard to spot -- it reads as the widget failing to do the thing,
 not as a stale handler.
+
+This has now cost time twice, and the second time from the other direction: a
+plugin reinstalled while the shell was already running kept the old `Model.js`,
+so the widget never sent a command that had just been added to it. Nothing
+logged, nothing looked broken, and the panel rendered perfectly -- it simply did
+not do the new thing. **Compare the shell's start time against the plugin
+directory's mtime before believing anything else**:
+
+```bash
+ps -o lstart= -p $(pgrep -x quickshell | head -1)
+date -r ~/.config/omarchy/plugins/shilai_li.studio-effects/Model.js
+```
+
+If the files are newer than the shell, that is the bug, whatever the symptom
+looks like.
 
 Reading qmllint output: `qs.Commons` and `qs.Ui` cannot resolve outside
 Quickshell, so every file emits a cascade of `[import]`, `[unqualified]`,

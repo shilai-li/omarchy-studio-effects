@@ -149,6 +149,10 @@ BarWidget {
       input: root.state.input,
       output: root.state.output,
       background: root.state.background,
+      // Reported because this is the only window onto what the widget believes,
+      // and diagnosing a preview that would not start meant guessing at it.
+      preview: root.state.preview,
+      previewPath: root.state.previewPath,
       error: root.state.error
     })
   }
