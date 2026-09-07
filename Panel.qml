@@ -320,9 +320,27 @@ Panel {
         // second reader on that device invalidates the first one's buffers and
         // would break the call this is previewing.
         Item {
+          id: previewBox
           width: parent.width
           visible: root.running
           height: root.running ? Math.round(width * 9 / 16) : 0
+
+          property int tick: 0
+          // Which of the two images is the one being shown.
+          property bool showingB: false
+          // Whether a frame has ever arrived. The placeholder is for the wait
+          // before the first one, not for the gap between every pair.
+          property bool everReady: false
+          property bool live: root.opened && root.previewLive
+
+          // A closed panel leaves nothing loaded, and the daemon deletes the
+          // file, so the next open starts from the placeholder rather than
+          // from a frame of a camera that may since have been turned off.
+          onLiveChanged: if (!live) {
+            previewA.source = ""
+            previewB.source = ""
+            previewBox.everReady = false
+          }
 
           Rectangle {
             anchors.fill: parent
@@ -330,40 +348,63 @@ Panel {
             radius: Style.space(4)
           }
 
+          // Two images, loaded alternately. The one on screen is never touched
+          // until its replacement has finished decoding, so there is no moment
+          // where neither has a picture -- which is what made the preview
+          // flicker, and what kept re-showing the placeholder ten times a
+          // second.
           Image {
-            id: previewImage
+            id: previewA
             anchors.fill: parent
             fillMode: Image.PreserveAspectCrop
             cache: false
             asynchronous: true
             smooth: true
-            visible: status === Image.Ready
-            source: ""
+            opacity: previewBox.showingB ? 0 : 1
+            onStatusChanged: if (status === Image.Ready) {
+              previewBox.showingB = false
+              previewBox.everReady = true
+            }
           }
 
-          // Until the first frame lands there is nothing to show, and a blank
-          // rectangle reads as a broken camera rather than one warming up.
+          Image {
+            id: previewB
+            anchors.fill: parent
+            fillMode: Image.PreserveAspectCrop
+            cache: false
+            asynchronous: true
+            smooth: true
+            opacity: previewBox.showingB ? 1 : 0
+            onStatusChanged: if (status === Image.Ready) {
+              previewBox.showingB = true
+              previewBox.everReady = true
+            }
+          }
+
           Text {
             anchors.centerIn: parent
-            visible: previewImage.status !== Image.Ready
+            visible: !previewBox.everReady
             textFormat: Text.PlainText
             text: "starting preview…"
             color: root.dim
             font.family: root.contentFontFamily
             font.pixelSize: Style.font.caption
           }
-        }
 
-        // Re-reads the file by clearing the source and setting it again. A
-        // query string would be the shorter trick, but Qt treats it as part of
-        // the name for a file: URL, so it would simply fail to load.
-        Timer {
-          interval: Model.PREVIEW_INTERVAL_MS
-          running: root.opened && root.previewLive
-          repeat: true
-          onTriggered: {
-            previewImage.source = ""
-            previewImage.source = "file://" + root.previewPath
+          // The daemon rewrites the file in place, and an Image will not notice
+          // a file changing under a URL it has already loaded. A query string
+          // makes each read a new URL; QUrl drops it when resolving a file:
+          // path, so the same file is what actually gets opened.
+          Timer {
+            interval: Model.PREVIEW_INTERVAL_MS
+            running: previewBox.live
+            repeat: true
+            onTriggered: {
+              previewBox.tick++
+              var url = "file://" + root.previewPath + "?t=" + previewBox.tick
+              if (previewBox.showingB) previewA.source = url
+              else previewB.source = url
+            }
           }
         }
 
