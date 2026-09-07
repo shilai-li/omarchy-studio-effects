@@ -89,7 +89,13 @@ omarchy plugin add https://github.com/shilai-li/omarchy-studio-effects.git --ena
 ```
 
 A glyph on the right of the bar shows what the camera is doing — off, blurred,
-or replaced — and clicking it opens the list.
+or replaced — and clicking it opens the panel, which shows a **live preview of
+what the far end of your call actually sees**, above the effect list.
+
+The preview runs only while the panel is open. It does not open Studio Camera
+to do it — a second reader on that device invalidates the first one's buffers
+and would break the call it is previewing — so the daemon publishes a small
+frame for the widget instead.
 
 | Key | |
 |---|---|

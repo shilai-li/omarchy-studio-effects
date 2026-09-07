@@ -9,7 +9,7 @@
 use anyhow::{Context, Result};
 use std::sync::{Arc, Mutex};
 use studio_effects_daemon::control::{self, Effect, Fixed, Settings};
-use studio_effects_daemon::{background, device, mask, nv12, segmenter};
+use studio_effects_daemon::{background, device, mask, nv12, preview, segmenter};
 use clap::Parser;
 use gstreamer as gst;
 use gstreamer::prelude::*;
@@ -263,6 +263,7 @@ fn main() -> Result<()> {
             args.effect
         },
         has_background: backdrop.is_some(),
+        preview: false,
     }));
 
     match control::serve(
@@ -273,6 +274,9 @@ fn main() -> Result<()> {
             output: output.clone().unwrap_or_else(|| "(none)".into()),
             width: args.width,
             height: args.height,
+            preview_path: preview::Preview::path_for_runtime()
+                .to_string_lossy()
+                .into_owned(),
         },
     ) {
         Ok(path) => println!("control socket at {}", path.display()),
@@ -282,11 +286,23 @@ fn main() -> Result<()> {
     }
     let mut timings = Timings::default();
     let mut frame_no = 0u32;
+    let mut preview: Option<preview::Preview> = None;
+
+    // A frame left by a daemon that was killed rather than shut down is a
+    // picture of somebody's camera sitting in the runtime directory. Drop
+    // cleans it up on an orderly exit; this covers the rest.
+    let _ = std::fs::remove_file(preview::Preview::path_for_runtime());
 
     loop {
         let sample = match sink.pull_sample() {
             Ok(s) => s,
-            Err(_) => break, // EOS or the camera went away
+            // End of stream is the source finishing on purpose; anything else
+            // is the camera going away under us. They have to be told apart:
+            // exiting cleanly on a glitch looks like a successful shutdown, so
+            // Restart=on-failure leaves the service down and the user's camera
+            // silently stops working until they notice.
+            Err(_) if sink.is_eos() => break,
+            Err(e) => anyhow::bail!("the camera stopped delivering frames: {e}"),
         };
         let info = gst_video::VideoInfo::from_caps(sample.caps().context("sample had no caps")?)?;
         let src_buf = sample.buffer().context("sample had no buffer")?;
@@ -308,9 +324,9 @@ fn main() -> Result<()> {
         // Read once per frame: the socket thread may change these at any point,
         // and a frame that blurred with one radius and blended with another
         // would tear.
-        let (effect, blur_radius) = {
+        let (effect, blur_radius, want_preview) = {
             let s = settings.lock().expect("settings mutex poisoned");
-            (s.effect, s.blur)
+            (s.effect, s.blur, s.preview)
         };
 
         let t = Instant::now();
@@ -351,6 +367,29 @@ fn main() -> Result<()> {
         }
 
         drop(in_frame);
+
+        // Built on first use and dropped when nothing is watching, so a daemon
+        // nobody has a panel open on runs no encoder at all -- and the stale
+        // last frame is removed with it, rather than left for a widget to show
+        // as if the camera were still on.
+        if want_preview {
+            if preview.is_none() {
+                match preview::Preview::new(args.height as i32, args.width as i32) {
+                    Ok(p) => preview = Some(p),
+                    Err(e) => eprintln!("preview unavailable: {e:#}"),
+                }
+            }
+            if let Some(p) = &mut preview {
+                // A failed preview is a stale picture in a widget. That is not
+                // a reason to drop somebody's video call, so it is reported
+                // once and the frame loop carries on.
+                if let Err(e) = p.offer(&dst, &info) {
+                    eprintln!("preview frame dropped: {e:#}");
+                }
+            }
+        } else if preview.is_some() {
+            preview = None;
+        }
 
         if let Some(path) = &args.snapshot {
             frame_no += 1;

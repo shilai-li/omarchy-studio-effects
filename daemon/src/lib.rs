@@ -5,4 +5,5 @@ pub mod control;
 pub mod device;
 pub mod mask;
 pub mod nv12;
+pub mod preview;
 pub mod segmenter;

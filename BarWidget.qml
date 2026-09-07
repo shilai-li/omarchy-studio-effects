@@ -96,6 +96,15 @@ BarWidget {
   function toggle() { root.send(Model.toggleCommand()) }
   function setEffect(effect) { root.send(Model.effectCommand(effect)) }
   function setBlur(radius) { root.send(Model.blurCommand(radius)) }
+
+  // Asked for only while the panel is open. Nothing is encoded for a picture
+  // nobody is looking at, and the daemon deletes the last frame when it stops
+  // -- so a widget can never show a still of a camera that is no longer on.
+  // Sent unconditionally rather than guarded on the last known state, which
+  // may be stale. Asking a daemon that is not there fails harmlessly and
+  // records that it is not there, so this is self-correcting where a guard
+  // would need the state to already be right.
+  function setPreview(on) { root.send(Model.previewCommand(on)) }
   function stepBlur(direction) { root.setBlur(Model.stepBlur(root.state, direction)) }
 
   // Give up on whatever is running and make sure nothing it prints is taken as

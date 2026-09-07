@@ -48,6 +48,10 @@ pub struct Settings {
     /// Whether a background image was loaded at startup. `replace` is refused
     /// rather than accepted-and-ignored when there is none.
     pub has_background: bool,
+    /// Whether to publish preview JPEGs. Off unless something is watching:
+    /// the widget turns it on when its panel opens and off when it closes, so
+    /// nothing is encoded for a picture nobody is looking at.
+    pub preview: bool,
 }
 
 /// Facts the socket reports but cannot change.
@@ -57,6 +61,9 @@ pub struct Fixed {
     pub output: String,
     pub width: u32,
     pub height: u32,
+    /// Where preview frames appear. Reported rather than assumed by the client,
+    /// so the two cannot disagree about it.
+    pub preview_path: String,
 }
 
 pub fn socket_path() -> PathBuf {
@@ -64,9 +71,15 @@ pub fn socket_path() -> PathBuf {
     PathBuf::from(dir).join("studio-effects.sock")
 }
 
+/// Quotes and backslashes only. Every string that reaches this is ours -- our
+/// messages and a path from the environment -- not text a stranger supplied.
+fn escape(text: &str) -> String {
+    text.replace('\\', r"\\").replace('"', r#"\""#)
+}
+
 fn json(settings: &Settings, fixed: &Fixed, error: Option<&str>) -> String {
     let mut out = format!(
-        r#"{{"effect":"{}","blur":{},"device":"{}","input":"{}","output":"{}","width":{},"height":{},"background":{}"#,
+        r#"{{"effect":"{}","blur":{},"device":"{}","input":"{}","output":"{}","width":{},"height":{},"background":{},"preview":{},"previewPath":"{}""#,
         settings.effect.as_str(),
         settings.blur,
         fixed.device,
@@ -75,11 +88,11 @@ fn json(settings: &Settings, fixed: &Fixed, error: Option<&str>) -> String {
         fixed.width,
         fixed.height,
         settings.has_background,
+        settings.preview,
+        escape(&fixed.preview_path),
     );
     if let Some(message) = error {
-        // Quotes and backslashes only: the messages are ours, not user text.
-        let escaped = message.replace('\\', r"\\").replace('"', r#"\""#);
-        out.push_str(&format!(r#","error":"{escaped}""#));
+        out.push_str(&format!(r#","error":"{}""#, escape(message)));
     }
     out.push('}');
     out
@@ -114,11 +127,16 @@ fn handle(line: &str, settings: &Mutex<Settings>, fixed: &Fixed) -> String {
                 Effect::None
             };
         }
+        "preview" => match arg {
+            Some("on") => s.preview = true,
+            Some("off") | None => s.preview = false,
+            _ => error = Some("usage: preview on|off"),
+        },
         "blur" => match arg.and_then(|a| a.parse::<usize>().ok()) {
             Some(n) if n <= 200 => s.blur = n,
             _ => error = Some("usage: blur <0-200>"),
         },
-        _ => error = Some("unknown command; try status, effect, toggle or blur"),
+        _ => error = Some("unknown command; try status, effect, toggle, blur or preview"),
     }
 
     json(&s, fixed, error)
@@ -182,6 +200,7 @@ mod tests {
             output: "/dev/video10".into(),
             width: 1280,
             height: 720,
+            preview_path: "/run/user/1000/studio-effects-preview.jpg".into(),
         }
     }
 
@@ -191,6 +210,7 @@ mod tests {
             blur: 12,
             resume: Effect::Blur,
             has_background,
+            preview: false,
         })
     }
 
@@ -227,6 +247,36 @@ mod tests {
         assert!(out.contains(r#""error""#), "{out}");
         assert!(out.contains(r#""effect":"blur""#), "{out}");
         assert!(handle("blur 9999", &s, &fixed()).contains(r#""blur":12"#));
+    }
+
+    /// The widget turns preview on when its panel opens and off when it
+    /// closes, so both directions have to work and neither may disturb the
+    /// effect.
+    #[test]
+    fn preview_toggles_without_touching_the_effect() {
+        let s = settings(false);
+        assert!(handle("status", &s, &fixed()).contains(r#""preview":false"#));
+        let out = handle("preview on", &s, &fixed());
+        assert!(out.contains(r#""preview":true"#), "{out}");
+        assert!(out.contains(r#""effect":"blur""#), "{out}");
+        assert!(handle("preview off", &s, &fixed()).contains(r#""preview":false"#));
+    }
+
+    /// A panel that closes without being seen to must still stop the encoder,
+    /// so a bare `preview` means off rather than an error.
+    #[test]
+    fn bare_preview_means_off() {
+        let s = settings(false);
+        handle("preview on", &s, &fixed());
+        let out = handle("preview", &s, &fixed());
+        assert!(out.contains(r#""preview":false"#), "{out}");
+        assert!(!out.contains(r#""error""#), "{out}");
+    }
+
+    #[test]
+    fn the_reply_says_where_preview_frames_appear() {
+        let s = settings(false);
+        assert!(handle("status", &s, &fixed()).contains("studio-effects-preview.jpg"));
     }
 
     #[test]

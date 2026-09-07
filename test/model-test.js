@@ -97,6 +97,26 @@ check("a missing daemon is not running, and shows no effect", () => {
   eq(s.effect, "none", "effect")
 })
 
+// ---- The live preview.
+
+check("preview is asked for explicitly in both directions", () => {
+  eq(M.previewCommand(true), [M.BINARY, "preview", "on"])
+  eq(M.previewCommand(false), [M.BINARY, "preview", "off"])
+})
+
+check("the preview path comes from the daemon, never rebuilt here", () => {
+  const s = M.parseStatus('{"effect":"blur","preview":true,"previewPath":"/run/user/1000/x.jpg"}')
+  eq(s.preview, true, "preview")
+  eq(s.previewPath, "/run/user/1000/x.jpg", "previewPath")
+})
+
+check("a reply with no preview fields never claims a path", () => {
+  const s = M.parseStatus(REPLY)
+  eq(s.preview, false, "preview")
+  eq(s.previewPath, "", "previewPath")
+  eq(M.notRunningState().previewPath, "", "previewPath when stopped")
+})
+
 // ---- What the bar shows.
 
 check("the glyph distinguishes off, blurred and replaced", () => {

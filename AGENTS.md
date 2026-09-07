@@ -51,6 +51,7 @@ daemon/src/main.rs       CLI, GStreamer wiring, per-stage timing
 daemon/src/nv12.rs       the frame maths, and the tests that pin it
 daemon/src/mask.rs       conditioning the model's output into an alpha
 daemon/src/background.rs decoding a replacement background once
+daemon/src/preview.rs    the JPEG the bar widget shows
 daemon/src/segmenter.rs  device choice, model cache, one inference per frame
 daemon/src/device.rs     resolving a v4l2 device by card label
 daemon/src/control.rs    the unix-socket control protocol and its state
@@ -265,6 +266,27 @@ Starting is not instant: systemd returns before the daemon has opened the
 camera, so the widget re-reads the state until it agrees rather than concluding
 from one silent reply that starting failed, and says "…" while it waits. A
 button that looks inert gets pressed again.
+
+**The preview must never open Studio Camera.** It is the obvious way to do it
+and it breaks the video call. `v4l2loopback` permits ten openers, but the
+second one's `REQBUFS` invalidates the first one's buffer pool: measured here, a
+reader joining a device another reader was already streaming produced `Failed to
+allocate a buffer` **in the one that was already working**. So the preview
+cannot be a `QtMultimedia` `Camera` on the output device, however much shorter
+that code would be. The daemon publishes a 320x180 JPEG to `$XDG_RUNTIME_DIR`
+instead, which contends with nothing.
+
+It is written to a temporary name and `rename(2)`d into place, because the
+widget re-reads the file on a timer: rename is atomic within a filesystem, so a
+reader gets the previous whole frame or the next whole frame, never half of one.
+It is published only while a panel is open — the widget asks on open and again
+on close — and the encoder is built on first use and dropped when nothing is
+watching, taking the last frame with it, so a widget can never show a still of a
+camera that is no longer running. A frame left behind by a daemon that was
+killed rather than stopped is removed at the next start.
+
+Cost is inside the noise: 12.90 ms/frame with it off against 12.69-13.08 with it
+on, at 1080p, publishing about nine frames a second.
 
 **The widget owns no settings, and that is the point.** The daemon holds the
 effect and the blur radius and answers every command with its whole state, so

@@ -37,6 +37,13 @@ Panel {
   property int selectedIndex: 0
   property bool cursorActive: false
 
+  // Bumped on a timer to re-read the preview file. The daemon rewrites it in
+  // place, and an Image will not notice a file changing underneath a URL it
+  // has already loaded.
+  property int previewTick: 0
+  readonly property string previewPath: root.state.previewPath || ""
+  readonly property bool previewLive: root.running && root.state.preview && previewPath.length > 0
+
   // ---- Theme. Nothing here names a color; the palette does.
   readonly property color contentForeground: bar ? bar.foreground : Color.foreground
   readonly property string contentFontFamily: bar ? bar.fontFamily : Style.font.family
@@ -50,9 +57,10 @@ Panel {
   // ---- Lifecycle.
   function open() {
     root.cursorActive = true
-    // The daemon may have been changed by the CLI or a keybinding since the
-    // glyph last polled, so this is the one moment it has to be right.
-    if (root.host) root.host.refresh()
+    // Turning the preview on doubles as the refresh: every reply carries the
+    // daemon's whole state. Asking for both would be one request too many --
+    // only one command is in flight at a time, so the second would be dropped.
+    if (root.host) root.host.setPreview(true)
     root.syncCursorToEffect()
     root.controller.show()
     Qt.callLater(function() {
@@ -61,6 +69,10 @@ Panel {
   }
 
   function close() {
+    // Stop the encoder on the way out, not on the way in to the next open: a
+    // panel closed on one monitor should cost nothing, and the daemon has no
+    // other way to know nobody is watching.
+    if (root.host) root.host.setPreview(false)
     root.setCenterHoverRevealSuppressed(false)
     root.controller.hide()
   }
@@ -301,6 +313,58 @@ Panel {
           width: parent.width
           visible: root.running
           foreground: root.contentForeground
+        }
+
+        // What the other end of the call actually sees. Reading the daemon's
+        // published JPEG rather than opening Studio Camera directly, because a
+        // second reader on that device invalidates the first one's buffers and
+        // would break the call this is previewing.
+        Item {
+          width: parent.width
+          visible: root.running
+          height: root.running ? Math.round(width * 9 / 16) : 0
+
+          Rectangle {
+            anchors.fill: parent
+            color: Qt.darker(root.contentForeground, 8.0)
+            radius: Style.space(4)
+          }
+
+          Image {
+            id: previewImage
+            anchors.fill: parent
+            fillMode: Image.PreserveAspectCrop
+            cache: false
+            asynchronous: true
+            smooth: true
+            visible: status === Image.Ready
+            source: ""
+          }
+
+          // Until the first frame lands there is nothing to show, and a blank
+          // rectangle reads as a broken camera rather than one warming up.
+          Text {
+            anchors.centerIn: parent
+            visible: previewImage.status !== Image.Ready
+            textFormat: Text.PlainText
+            text: "starting preview…"
+            color: root.dim
+            font.family: root.contentFontFamily
+            font.pixelSize: Style.font.caption
+          }
+        }
+
+        // Re-reads the file by clearing the source and setting it again. A
+        // query string would be the shorter trick, but Qt treats it as part of
+        // the name for a file: URL, so it would simply fail to load.
+        Timer {
+          interval: Model.PREVIEW_INTERVAL_MS
+          running: root.opened && root.previewLive
+          repeat: true
+          onTriggered: {
+            previewImage.source = ""
+            previewImage.source = "file://" + root.previewPath
+          }
         }
 
         Column {

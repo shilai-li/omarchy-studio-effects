@@ -50,6 +50,16 @@ function effectCommand(effect) {
     return isEffect(effect) ? command(["effect", effect]) : null;
 }
 
+// Preview frames are only published while something is looking at them, so the
+// panel turns this on when it opens and off when it closes.
+function previewCommand(on) {
+    return command(["preview", on ? "on" : "off"]);
+}
+
+// How often the panel re-reads the preview file. The daemon publishes about ten
+// a second; asking much faster only re-decodes the same JPEG.
+var PREVIEW_INTERVAL_MS = 100;
+
 function blurCommand(radius) {
     return command(["blur", String(clampBlur(radius))]);
 }
@@ -76,6 +86,8 @@ function unknownState(reason) {
         input: "",
         output: "",
         background: false,
+        preview: false,
+        previewPath: "",
         error: reason || ""
     };
 }
@@ -106,6 +118,10 @@ function parseStatus(text) {
         input: typeof parsed.input === "string" ? parsed.input : "",
         output: typeof parsed.output === "string" ? parsed.output : "",
         background: parsed.background === true,
+        preview: parsed.preview === true,
+        // Taken from the daemon rather than rebuilt here, so the two cannot
+        // disagree about where the frames are.
+        previewPath: typeof parsed.previewPath === "string" ? parsed.previewPath : "",
         // The daemon reports a refusal in the reply as well as in its exit
         // code. Carrying it through means the panel can say why a choice did
         // not take rather than just failing to change.
@@ -200,6 +216,8 @@ if (typeof module !== "undefined" && module.exports) {
         toggleCommand: toggleCommand,
         effectCommand: effectCommand,
         blurCommand: blurCommand,
+        previewCommand: previewCommand,
+        PREVIEW_INTERVAL_MS: PREVIEW_INTERVAL_MS,
         isEffect: isEffect,
         clampBlur: clampBlur,
         unknownState: unknownState,
