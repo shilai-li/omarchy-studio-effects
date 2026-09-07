@@ -333,13 +333,31 @@ Panel {
           property bool everReady: false
           property bool live: root.opened && root.previewLive
 
+          // A daemon too old to know the `preview` command leaves the flag
+          // false forever, and "starting preview…" then sits there implying
+          // something is on its way that never is. After a grace period long
+          // enough to cover the round trip, say what is actually true.
+          property bool givenUp: false
+
           // A closed panel leaves nothing loaded, and the daemon deletes the
           // file, so the next open starts from the placeholder rather than
           // from a frame of a camera that may since have been turned off.
-          onLiveChanged: if (!live) {
-            previewA.source = ""
-            previewB.source = ""
-            previewBox.everReady = false
+          onLiveChanged: {
+            if (live) {
+              previewBox.givenUp = false
+            } else {
+              previewA.source = ""
+              previewB.source = ""
+              previewBox.everReady = false
+            }
+          }
+
+          // Restarted whenever the panel opens, so a daemon that starts
+          // answering later is not written off from an earlier attempt.
+          Timer {
+            interval: 2500
+            running: root.opened && root.running && !previewBox.live
+            onTriggered: previewBox.givenUp = true
           }
 
           Rectangle {
@@ -383,12 +401,17 @@ Panel {
 
           Text {
             anchors.centerIn: parent
+            width: parent.width - Style.space(24)
+            horizontalAlignment: Text.AlignHCenter
             visible: !previewBox.everReady
             textFormat: Text.PlainText
-            text: "starting preview…"
+            text: previewBox.givenUp
+                ? "No preview from the daemon.\nIt may be older than this widget."
+                : "starting preview…"
             color: root.dim
             font.family: root.contentFontFamily
             font.pixelSize: Style.font.caption
+            wrapMode: Text.WordWrap
           }
 
           // The daemon rewrites the file in place, and an Image will not notice
