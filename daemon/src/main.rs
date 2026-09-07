@@ -73,8 +73,19 @@ struct Args {
     #[arg(long, default_value_t = 0)]
     desat: u32,
 
-    /// Track the subject and keep them centred.
-    #[arg(long, default_value_t = false)]
+    /// Track the subject and keep them centred: on or off.
+    ///
+    /// Takes a value rather than being a bare flag, because the systemd unit
+    /// has no way to omit an argument and must pass `--framing=${FRAMING}`
+    /// whatever the setting is. An empty value counts as off, for the same
+    /// reason `--background` does.
+    ///
+    /// `action = Set` is required: clap infers a flag for any `bool` field and
+    /// a `value_parser` alone does not change that, so without it the argument
+    /// still refuses to take a value -- and the failure is at runtime, in the
+    /// service, not at compile time.
+    #[arg(long, default_value = "off", value_parser = parse_switch,
+          action = clap::ArgAction::Set)]
     framing: bool,
 
     /// Furthest the framing may crop in, 1.0 to 3.0. The crop is scaled back to
@@ -119,6 +130,19 @@ struct Args {
     /// what the composite actually looks like without a loopback device.
     #[arg(long)]
     snapshot: Option<String>,
+}
+
+/// Accepts the words a config file and a socket command already use, so the
+/// same setting is not spelled three different ways depending on where it is
+/// written.
+fn parse_switch(s: &str) -> Result<bool, String> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "on" | "true" | "yes" | "1" => Ok(true),
+        // Empty is off: the unit passes the argument unconditionally, so an
+        // unset environment variable arrives as an empty string.
+        "off" | "false" | "no" | "0" | "" => Ok(false),
+        other => Err(format!("expected on or off, got {other:?}")),
+    }
 }
 
 fn parse_device(s: &str) -> Result<String, String> {

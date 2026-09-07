@@ -337,6 +337,16 @@ The crop runs **last**, after segmentation and compositing, so both always see
 the whole frame. A subject who walks outside the crop still has to be findable,
 or the camera could never follow them back.
 
+**Run the daemon the way the unit runs it, not the way you would type it.** A
+`bool` field in clap is a bare flag, and a unit has no way to omit an argument,
+so `--framing=${FRAMING}` met `--framing` and the service exited
+2/INVALIDARGUMENT in a restart loop. Every manual test passed, because every
+manual test typed `--framing` by hand. Switches therefore take a value
+(`on`/`off`/empty) and need `action = clap::ArgAction::Set` -- a `value_parser`
+alone does not stop clap inferring a flag, and that failure is at runtime in the
+service rather than at compile time. `test/unit-args-test.sh` runs the daemon
+with the unit's own ExecStart so this cannot come back.
+
 **Adding a setting means four places, and the parser is the one that gets
 forgotten.** `Model.PARAMS` is the single list the panel builds its rows from,
 so a new knob needs: the daemon's `Settings` and its socket command, the
@@ -423,6 +433,7 @@ a stale edge for one frame is invisible, a stutter is not.
 /usr/bin/python3 tools/load.py      # per-device CPU cost at a real 30 fps cadence
 
 cd daemon && cargo test             # reference tests for the hot loops and the mask
+bash test/unit-args-test.sh         # the systemd unit's arguments, against the real daemon
 
 omarchy plugin validate .           # manifest + entry points
 bash test/model-test.sh             # Model.js under plain node, no compositor
