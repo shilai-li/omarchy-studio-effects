@@ -44,11 +44,23 @@ BarWidget {
   // and whatever it prints is dropped: a late answer is not a current one.
   property int generation: 0
 
+  // The most recent request made while another was in flight. One slot, not a
+  // queue: holding every keypress would replay a burst of blur changes one at
+  // a time long after the user stopped pressing, and only the last one was
+  // ever wanted.
+  //
+  // Dropping it instead, which is what this did first, loses commands that are
+  // not merely the newest of a burst -- opening the panel asks to start the
+  // preview immediately after a status read, and that request went missing
+  // every time, so the preview simply never started.
+  property var pending: null
+
   function send(argv) {
     if (!argv) return
-    // A command already in flight is the current one and it has a deadline.
-    // Pressing a key again while it runs is not a reason to start a second.
-    if (clientProc.running) return
+    if (clientProc.running) {
+      root.pending = argv
+      return
+    }
 
     root.generation++
     clientProc.generation = root.generation
@@ -111,6 +123,10 @@ BarWidget {
   // current. Used by the deadline, and on the way out.
   function abandon() {
     deadline.stop()
+    // Whatever was waiting behind a command that had to be given up on is
+    // waiting on a daemon that is not answering. Sending it would only queue
+    // another timeout.
+    root.pending = null
     root.generation++
     if (clientProc.running) {
       clientProc.signal(15)
@@ -207,6 +223,12 @@ BarWidget {
       if (root.switching) {
         if (root.state.running === root.expectRunning) root.switching = false
         else settleTimer.restart()
+      }
+
+      if (root.pending) {
+        var next = root.pending
+        root.pending = null
+        root.send(next)
       }
     }
   }
