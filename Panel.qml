@@ -128,6 +128,15 @@ Panel {
     else if (key === "p") root.togglePower()
   }
 
+  // The preview is asked for on open, but a daemon can arrive long after that:
+  // pressing `p` stops and restarts it underneath a panel that stays open the
+  // whole time, so open() never runs again and nothing would re-request the
+  // frames. Watch the daemon coming back instead of the panel opening.
+  onRunningChanged: {
+    previewBox.givenUp = false
+    if (root.running && root.opened && root.host) root.host.setPreview(true)
+  }
+
   // `replace` disappearing — the daemon restarted without a background — can
   // leave the cursor past the end of the list.
   onRowsChanged: {
