@@ -283,6 +283,12 @@ BarWidget {
         } else {
           settleTimer.restart()
         }
+      } else if (root.powerNote.length > 0 && root.state.running === root.expectRunning) {
+        // The note outlived the problem. A daemon that was slow to start, or a
+        // service fixed and restarted since, leaves a complaint on screen that
+        // is no longer true -- and a warning that does not go away when the
+        // fault does teaches people to ignore warnings.
+        root.powerNote = ""
       }
 
       if (root.pending) {

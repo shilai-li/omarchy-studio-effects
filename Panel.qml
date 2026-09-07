@@ -357,6 +357,23 @@ Panel {
           }
         }
 
+        // A power change systemd accepted but the daemon did not follow. Shown
+        // rather than swallowed: the alternative is a switch that appears to do
+        // nothing, which sends anyone looking straight at the widget.
+        Text {
+          width: parent.width
+          visible: root.powerNote.length > 0
+          textFormat: Text.PlainText
+          text: root.powerNote
+          color: root.accentColor
+          font.family: root.contentFontFamily
+          font.pixelSize: Style.font.caption
+          wrapMode: Text.WordWrap
+          leftPadding: Style.space(8)
+          rightPadding: Style.space(8)
+          bottomPadding: Style.space(4)
+        }
+
         // A peer of the power switch, not one of the effects: it filters the
         // microphone, works with the camera off, and is a separate unit that
         // fails on its own.
@@ -405,23 +422,6 @@ Panel {
             font.pixelSize: root.voice === "missing" ? Style.font.caption : Style.font.body
             font.bold: root.voice !== "missing"
           }
-        }
-
-        // A power change systemd accepted but the daemon did not follow. Shown
-        // rather than swallowed: the alternative is a switch that appears to do
-        // nothing, which sends anyone looking straight at the widget.
-        Text {
-          width: parent.width
-          visible: root.powerNote.length > 0
-          textFormat: Text.PlainText
-          text: root.powerNote
-          color: root.accentColor
-          font.family: root.contentFontFamily
-          font.pixelSize: Style.font.caption
-          wrapMode: Text.WordWrap
-          leftPadding: Style.space(8)
-          rightPadding: Style.space(8)
-          bottomPadding: Style.space(4)
         }
 
         Text {
