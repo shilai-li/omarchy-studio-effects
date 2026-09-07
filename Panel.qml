@@ -31,6 +31,7 @@ Panel {
   //      instantiates this bare, before injection.
   readonly property var state: host ? host.state : Model.notRunningState()
   readonly property bool running: state.running === true
+  readonly property bool switching: host ? host.switching === true : false
   readonly property var rows: Model.availableEffects(root.state)
 
   property int selectedIndex: 0
@@ -99,6 +100,10 @@ Panel {
     root.host.setEffect(root.rows[root.selectedIndex])
   }
 
+  function togglePower() {
+    if (root.host) root.host.toggleService()
+  }
+
   function stepBlur(direction) {
     if (!root.host) return
     root.host.stepBlur(direction)
@@ -108,6 +113,7 @@ Panel {
     var key = String(text).toLowerCase()
     if (key === "r" && root.host) root.host.refresh()
     else if (key === "f" && root.host) root.host.toggle()
+    else if (key === "p") root.togglePower()
   }
 
   // `replace` disappearing — the daemon restarted without a background — can
@@ -227,19 +233,74 @@ Panel {
           foreground: root.contentForeground
         }
 
-        // No daemon is its own state, not an empty list: the fix is to start
-        // something, which an empty list would never tell anyone.
+        // The real switch. Off is not "effects disabled" but "the camera is
+        // released": while the daemon runs it holds the camera open, the
+        // recording light stays lit, and nothing else can open the real
+        // camera. That is worth a row of its own above the effects, not a
+        // choice buried among them.
+        CursorSurface {
+          id: powerRow
+          width: parent.width
+          height: root.rowHeight
+          hasCursor: false
+          foreground: root.contentForeground
+          accent: Color.accent
+          fill: root.hoverFill
+          currentFill: root.selectedFill
+
+          MouseArea {
+            anchors.fill: parent
+            hoverEnabled: true
+            cursorShape: Qt.PointingHandCursor
+            onClicked: root.togglePower()
+          }
+
+          Text {
+            anchors.left: parent.left
+            anchors.leftMargin: Style.space(8)
+            anchors.verticalCenter: parent.verticalCenter
+            textFormat: Text.PlainText
+            text: "Studio Effects"
+            color: root.contentForeground
+            font.family: root.contentFontFamily
+            font.pixelSize: Style.font.body
+          }
+
+          Text {
+            anchors.right: parent.right
+            anchors.rightMargin: Style.space(8)
+            anchors.verticalCenter: parent.verticalCenter
+            textFormat: Text.PlainText
+            // Saying so while it happens matters here: starting the daemon
+            // takes a moment to open the camera, and a button that looks
+            // inert gets pressed again.
+            text: root.switching ? "…" : Model.powerLabel(root.state)
+            color: root.running ? root.accentColor : root.dim
+            font.family: root.contentFontFamily
+            font.pixelSize: Style.font.body
+            font.bold: true
+          }
+        }
+
         Text {
           width: parent.width
-          visible: !root.running
+          visible: !root.running && !root.switching
           textFormat: Text.PlainText
-          text: "The daemon is not running.\n\nsystemctl --user start studio-effects"
+          text: "The camera is released and the NPU is idle. Turning this on "
+              + "opens your camera; the recording light will come on."
           color: root.dim
           font.family: root.contentFontFamily
-          font.pixelSize: Style.font.bodySmall
+          font.pixelSize: Style.font.caption
           wrapMode: Text.WordWrap
-          topPadding: Style.space(6)
+          leftPadding: Style.space(8)
+          rightPadding: Style.space(8)
           bottomPadding: Style.space(6)
+        }
+
+        PanelSeparator {
+          width: parent.width
+          visible: root.running
+          foreground: root.contentForeground
         }
 
         Column {
@@ -285,7 +346,9 @@ Panel {
         Text {
           width: parent.width
           textFormat: Text.PlainText
-          text: "↑↓ move   enter choose   ←→ blur   f toggle   esc close"
+          text: root.running
+              ? "↑↓ move   enter choose   ←→ blur   p off   esc close"
+              : "p turn on   esc close"
           color: root.dim
           font.family: root.contentFontFamily
           font.pixelSize: Style.font.caption

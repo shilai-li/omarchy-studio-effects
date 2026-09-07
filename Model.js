@@ -7,6 +7,14 @@
 // here is named outright rather than found on an inherited PATH.
 var BINARY = "/usr/bin/studio-effects";
 
+// Starting and stopping the daemon is the real on/off switch, not `effect
+// none`. While the daemon runs it holds the camera open: the recording light
+// stays lit, no other application can use the real camera, and frames are
+// segmented and composited whether or not anything is watching. `effect none`
+// only stops the compositing.
+var SYSTEMCTL = "/usr/bin/systemctl";
+var UNIT = "studio-effects.service";
+
 var EFFECTS = ["none", "blur", "replace"];
 var BLUR_MIN = 0;
 var BLUR_MAX = 200;
@@ -27,6 +35,15 @@ function command(args) {
 }
 
 function statusCommand() { return command(["status"]); }
+
+function startCommand() { return [SYSTEMCTL, "--user", "start", UNIT]; }
+function stopCommand() { return [SYSTEMCTL, "--user", "stop", UNIT]; }
+
+// The daemon needs a moment to open the camera after systemd reports the unit
+// started, so the widget re-asks rather than concluding from one silent reply
+// that starting failed.
+var SETTLE_ATTEMPTS = 10;
+var SETTLE_INTERVAL_MS = 400;
 function toggleCommand() { return command(["toggle"]); }
 
 function effectCommand(effect) {
@@ -111,6 +128,18 @@ function glyphFor(state) {
     return "\u{F0568}";
 }
 
+// The power row's label. Separate from labelFor because "off" here means the
+// camera is released, which is a different claim from "effects are off".
+function powerLabel(state) {
+    return state && state.running ? "On" : "Off";
+}
+
+function powerHint(state) {
+    return state && state.running
+        ? "camera open"
+        : "camera released";
+}
+
 function labelFor(state) {
     if (!state || !state.running) return "Not running";
     if (state.effect === "replace") return "Background replaced";
@@ -158,8 +187,16 @@ if (typeof module !== "undefined" && module.exports) {
         BLUR_STEP: BLUR_STEP,
         TIMEOUT_SECONDS: TIMEOUT_SECONDS,
         MAX_REPLY_BYTES: MAX_REPLY_BYTES,
+        SYSTEMCTL: SYSTEMCTL,
+        UNIT: UNIT,
+        SETTLE_ATTEMPTS: SETTLE_ATTEMPTS,
+        SETTLE_INTERVAL_MS: SETTLE_INTERVAL_MS,
         command: command,
         statusCommand: statusCommand,
+        startCommand: startCommand,
+        stopCommand: stopCommand,
+        powerLabel: powerLabel,
+        powerHint: powerHint,
         toggleCommand: toggleCommand,
         effectCommand: effectCommand,
         blurCommand: blurCommand,

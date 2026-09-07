@@ -44,6 +44,27 @@ check("blur is clamped before it is sent", () => {
   eq(M.blurCommand("nonsense"), [M.BINARY, "blur", "12"])
 })
 
+// ---- Starting and stopping the daemon. This, not `effect none`, is what
+//      releases the camera.
+
+check("the unit is started and stopped by absolute path", () => {
+  ok(M.SYSTEMCTL.startsWith("/"), "systemctl should be an absolute path")
+  eq(M.startCommand(), [M.SYSTEMCTL, "--user", "start", M.UNIT])
+  eq(M.stopCommand(), [M.SYSTEMCTL, "--user", "stop", M.UNIT])
+})
+
+check("it is a user unit, never a system one", () => {
+  ok(M.startCommand().indexOf("--user") !== -1, "start should be --user")
+  ok(M.stopCommand().indexOf("--user") !== -1, "stop should be --user")
+})
+
+check("off says the camera is released, not merely that effects are off", () => {
+  eq(M.powerLabel(M.notRunningState()), "Off")
+  eq(M.powerLabel({ running: true }), "On")
+  ok(M.powerHint(M.notRunningState()).indexOf("released") !== -1)
+  ok(M.powerHint({ running: true }).indexOf("open") !== -1)
+})
+
 // ---- Parsing. Every reply carries the whole state, so this is the only
 //      place a reply is ever interpreted.
 

@@ -248,6 +248,24 @@ anywhere. Measured both ways: with access `npu_busy_time_us` climbed 54463 us
 over nine seconds; without it, zero, and the daemon announced its fallback
 exactly as designed.
 
+**Off means the camera is released, not that compositing stopped.** `effect
+none` is not an off switch: the daemon still holds the camera open, so the
+recording light stays lit, nothing else can open the real camera, and every
+frame is still captured. The widget's on/off starts and stops
+`studio-effects.service` itself, and the unit is deliberately not enabled at
+boot.
+
+This is why the two units are separate, and the split has to stay that way.
+`studio-effects-loopback.service` keeps "Studio Camera" present at all times so
+an app can select it once and keep that selection, while the daemon behind it
+comes and goes. Merging them would mean either a camera that vanishes from
+every app's picker when effects are off, or a camera held open all day.
+
+Starting is not instant: systemd returns before the daemon has opened the
+camera, so the widget re-reads the state until it agrees rather than concluding
+from one silent reply that starting failed, and says "…" while it waits. A
+button that looks inert gets pressed again.
+
 **The widget owns no settings, and that is the point.** The daemon holds the
 effect and the blur radius and answers every command with its whole state, so
 there is one copy of the truth and the widget only ever shows it.

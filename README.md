@@ -39,10 +39,25 @@ builds nothing and runs nothing.
 ```bash
 cd packaging && makepkg -si
 sudo systemctl enable --now studio-effects-loopback   # creates "Studio Camera"
-systemctl --user enable --now studio-effects          # runs the daemon
+omarchy plugin add https://github.com/shilai-li/omarchy-studio-effects.git --enable
 ```
 
-Then pick **Studio Camera** in Zoom, Meet, or any browser.
+Then pick **Studio Camera** in Zoom, Meet, or any browser, and turn effects on
+from the bar.
+
+Only the loopback is enabled at boot. **Studio Camera is always there** — apps
+can select it and keep that selection — while the daemon behind it runs only
+when you turn effects on. That matters: while the daemon runs it holds your
+camera open, so the recording light is lit and nothing else can open the real
+camera. Off means off.
+
+```
+studio-effects-loopback.service   always up    → "Studio Camera" exists
+studio-effects.service            on demand    → camera open, NPU working
+```
+
+If you would rather it were always up, `systemctl --user enable --now
+studio-effects`.
 
 To point it at a different camera, or change the resolution or blur:
 

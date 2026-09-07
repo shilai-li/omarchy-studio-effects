@@ -30,6 +30,13 @@ BarWidget {
   readonly property string glyph: Model.glyphFor(root.state)
   readonly property bool effectsOn: root.state.running && root.state.effect !== "none"
 
+  // A start or stop is in flight. The daemon takes a moment to open the camera
+  // after systemd reports the unit started, so the widget waits for the socket
+  // to answer rather than claiming success the instant systemctl returns.
+  property bool switching: false
+  property bool expectRunning: false
+  property int settleAttempts: 0
+
   // ---- Talking to the daemon.
   //
   // Every run carries a generation. A reply that is superseded, that overruns
@@ -51,6 +58,41 @@ BarWidget {
   }
 
   function refresh() { root.send(Model.statusCommand()) }
+
+  // ---- Power. Starting and stopping the unit is the real on/off switch.
+  //
+  // While the daemon runs it holds the camera open: the recording light stays
+  // lit, nothing else can open the real camera, and every frame is segmented
+  // and composited whether or not anyone is watching. `effect none` only stops
+  // the compositing, which is why it is not what this button does.
+  function startService() { root.runUnit(Model.startCommand(), true) }
+  function stopService() { root.runUnit(Model.stopCommand(), false) }
+  function toggleService() {
+    if (root.switching) return
+    root.state.running ? root.stopService() : root.startService()
+  }
+
+  function runUnit(argv, expectRunning) {
+    if (unitProc.running || root.switching) return
+    root.switching = true
+    root.expectRunning = expectRunning
+    root.settleAttempts = 0
+    unitProc.command = argv
+    unitProc.running = true
+  }
+
+  // systemctl returning is not the daemon being ready, so the state is re-read
+  // until it agrees with what was asked for. Giving up leaves whatever the
+  // daemon last said on screen rather than a guess.
+  function settle() {
+    if (root.settleAttempts >= Model.SETTLE_ATTEMPTS) {
+      root.switching = false
+      return
+    }
+    root.settleAttempts++
+    root.refresh()
+    settleTimer.restart()
+  }
   function toggle() { root.send(Model.toggleCommand()) }
   function setEffect(effect) { root.send(Model.effectCommand(effect)) }
   function setBlur(radius) { root.send(Model.blurCommand(radius)) }
@@ -75,6 +117,7 @@ BarWidget {
   function statusJson() {
     return JSON.stringify({
       running: root.state.running,
+      switching: root.switching,
       effect: root.state.effect,
       blur: root.state.blur,
       device: root.state.device,
@@ -121,8 +164,10 @@ BarWidget {
   // holding a pipe nobody is reading.
   Component.onDestruction: {
     killTimer.stop()
+    settleTimer.stop()
     root.abandon()
     if (clientProc.running) clientProc.running = false
+    if (unitProc.running) unitProc.running = false
   }
 
   Process {
@@ -143,16 +188,43 @@ BarWidget {
       // so the reply, not the code, decides which happened. A refusal still
       // prints the daemon's full state and is worth applying.
       var parsed = Model.parseStatus(clientOut.text)
-      if (parsed.ok) {
-        root.state = parsed
-        return
+      if (parsed.ok) root.state = parsed
+      else if (exitStatus !== 0 || exitCode !== 0) root.noteUnreachable()
+      else root.state = parsed
+
+      // A start or stop is only finished once the daemon agrees. Until then
+      // the widget keeps asking, so the glyph never settles on a state the
+      // daemon is not actually in.
+      if (root.switching) {
+        if (root.state.running === root.expectRunning) root.switching = false
+        else settleTimer.restart()
       }
+    }
+  }
+
+  // systemctl itself. Kept apart from the client's generation bookkeeping:
+  // this is a different question with a different failure mode, and letting a
+  // slow start cancel a status read would make the glyph flicker.
+  Process {
+    id: unitProc
+    stderr: StdioCollector { id: unitErr; waitForEnd: true }
+
+    onExited: function (exitCode, exitStatus) {
       if (exitStatus !== 0 || exitCode !== 0) {
+        // systemd refused outright — a masked unit, or one that is not
+        // installed. No amount of waiting will change that.
+        root.switching = false
         root.noteUnreachable()
         return
       }
-      root.state = parsed
+      root.settle()
     }
+  }
+
+  Timer {
+    id: settleTimer
+    interval: Model.SETTLE_INTERVAL_MS
+    onTriggered: root.settle()
   }
 
   // The client speaks to a unix socket on this machine: it answers at once or
@@ -206,6 +278,9 @@ BarWidget {
     function hide(): void { root.close() }
     function refresh(): void { root.refresh() }
     function toggleEffects(): void { root.toggle() }
+    function on(): void { root.startService() }
+    function off(): void { root.stopService() }
+    function togglePower(): void { root.toggleService() }
     function status(): string { return root.statusJson() }
   }
 

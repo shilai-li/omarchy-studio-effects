@@ -1,5 +1,12 @@
 # The daemon itself, as a user service.
 #
+# Deliberately not enabled by default. While this runs it holds the camera
+# open: the recording light stays lit, nothing else can open the real camera,
+# and every frame is segmented and composited whether or not anyone is
+# watching. The bar widget starts and stops it on demand, which is what the
+# on/off switch actually does -- `effect none` only stops the compositing.
+# Enable it yourself if you would rather it were always up.
+#
 # A user unit, not a system one: it reads the user's camera and follows their
 # session, and there is nothing here that wants root. Note that this means
 # SupplementaryGroups= is unavailable -- the user manager has no privilege to
