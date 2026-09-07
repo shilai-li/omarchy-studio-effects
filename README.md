@@ -101,10 +101,23 @@ frame for the widget instead.
 |---|---|
 | `↑` `↓` (or `k` `j`) | move |
 | `enter` / `space` | choose that effect |
-| `←` `→` (or `h` `l`) | more or less blur |
+| `←` `→` (or `h` `l`) | adjust the selected setting |
 | `f` | turn effects off, or back on |
 | `r` | re-read the daemon |
 | `esc` | close |
+
+Below the effects are the settings that apply to whichever one is on:
+
+| | |
+|---|---|
+| **Blur** | radius, 0-200 |
+| **Smoothness** | blur repeats, 1-3. One streaks against hard edges; two looks Gaussian |
+| **Darken** | dim the background, 0-100, so you stand out |
+| **Desaturate** | drain its colour, 0-100 |
+
+Darken and desaturate touch the background only, never you, and work behind a
+replaced image as well as a blur. Settings the current effect ignores are not
+shown — replace has no blur to soften, so it offers no blur rows.
 
 **Replace background** only appears when the daemon actually has an image
 loaded, because offering a choice it would refuse is worse than not offering it.

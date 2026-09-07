@@ -297,6 +297,15 @@ killed rather than stopped is removed at the next start.
 Cost is inside the noise: 12.90 ms/frame with it off against 12.69-13.08 with it
 on, at 1080p, publishing about nine frames a second.
 
+**Adding a setting means four places, and the parser is the one that gets
+forgotten.** `Model.PARAMS` is the single list the panel builds its rows from,
+so a new knob needs: the daemon's `Settings` and its socket command, the
+`json()` reply, `PARAMS`, and **`parseStatus`**. Skipping the last one is
+silent: the panel renders a row, the daemon accepts changes, and the value sits
+at its minimum while the daemon plainly uses something else. It showed up as
+Smoothness reading 1 against a daemon reporting 2. A test now walks `PARAMS`
+against a parsed reply so that fails instead.
+
 **The widget owns no settings, and that is the point.** The daemon holds the
 effect and the blur radius and answers every command with its whole state, so
 there is one copy of the truth and the widget only ever shows it.
