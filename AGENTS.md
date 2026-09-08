@@ -357,27 +357,24 @@ and producing pure silence. Checking the port list looked like verification and
 was not. Read the log: `pipewire -c <conf>` with `log.level = 2` says exactly
 what is wrong, and a working graph reports no error at all.
 
-**The voice source is mono, and every attempt to change that breaks it.** A
-mono microphone monitored through stereo speakers can come out of the left one
-only, which invites a fix. Both obvious fixes stop the graph dead. Measured
-against a tone the microphone could hear at 10%:
+**Ask the plugin for stereo; do not widen a mono graph afterwards.** RNNoise
+ships `noise_suppressor_mono` and `noise_suppressor_stereo`, and the mono one is
+the obvious choice for a microphone -- but a mono source is monitored through
+one speaker only, and every way of widening it afterwards fails. Measured
+against a tone the microphone heard at 10%:
 
 | graph | result |
 |---|---|
-| one output, mono | passes audio, no error |
-| two outputs via a `copy` node | exact silence, graph errors |
-| one output, stereo `playback.props` | exact silence, graph errors |
+| mono plugin, one output | passes audio, ch1 exactly 0.000% |
+| mono plugin, output named twice | refused: "already used as output 0, use copy" |
+| mono plugin + `copy` node, two outputs | silence |
+| mono plugin, stereo `playback.props` | silence |
+| **stereo plugin** | **two ports in and out, audio on both channels** |
 
-Naming one output port twice fails outright ("already used as output 0, use
-copy"); routing through a `copy` node clears *that* error and still produces
-nothing. So the config leaves the graph to work out its own ports and publishes
-`capture_MONO`. A microphone that plays out of one speaker while being monitored
-is a far smaller problem than one that produces nothing at all, and what reaches
-the far end of a call is mono either way.
-
-Setting `audio.channels` or `audio.position` on `capture.props` is separately
-wrong: it made the capture node adopt the microphone array's four channels
-rather than downmixing to the one the mono plugin wants.
+So the config uses `noise_suppressor_stereo` and lets the graph work out its own
+ports. Do not set `audio.channels` or `audio.position` on `capture.props` to
+help: that made the capture node adopt the microphone array's four channels
+instead of negotiating the two the plugin wants.
 
 **Framing is a problem about holding still, not about tracking.** Finding the
 subject is free -- the mask is already a per-pixel map of them, so `subject_box`

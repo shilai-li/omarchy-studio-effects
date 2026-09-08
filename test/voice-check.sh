@@ -62,10 +62,13 @@ def level(path):
     s = array.array({1: "b", 2: "h", 4: "i"}[sw])
     s.frombytes(raw)
     full = float(1 << (8 * sw - 1))
-    mono = s[0::ch]
-    peak = max(abs(x) for x in mono) / full
-    rms = (sum(float(x) * x for x in mono) / len(mono)) ** 0.5 / full
-    return peak * 100, rms * 100
+    per_channel = []
+    for c in range(ch):
+        part = s[c::ch]
+        peak = max(abs(x) for x in part) / full
+        rms = (sum(float(x) * x for x in part) / len(part)) ** 0.5 / full
+        per_channel.append((peak * 100, rms * 100))
+    return per_channel
 
 out = sys.argv[1]
 r = level(f"{out}/raw.wav")
@@ -73,9 +76,23 @@ f = level(f"{out}/filtered.wav")
 if r is None or f is None:
     sys.exit("  recording failed; is anything else holding the microphone?")
 
-print(f"  raw microphone   peak {r[0]:6.2f}%   rms {r[1]:6.3f}%")
-print(f"  voice focus      peak {f[0]:6.2f}%   rms {f[1]:6.3f}%")
+def show(label, chans):
+    for i, (peak, rms) in enumerate(chans):
+        side = " (left)" if i == 0 and len(chans) > 1 else " (right)" if i == 1 else ""
+        print(f"  {label if i == 0 else '':16} ch{i}{side:8} peak {peak:6.2f}%   rms {rms:6.3f}%")
+
+show("raw microphone", r)
+show("voice focus", f)
 print()
+
+# Both channels must carry the voice, or it plays out of one speaker only.
+if len(f) > 1 and f[0][0] > 0.5 and f[1][0] < f[0][0] * 0.1:
+    print("  Only the left channel has audio; the source is effectively mono.")
+    print("  Check that voice-focus.conf uses noise_suppressor_stereo.")
+    print()
+
+r = r[0]
+f = f[0]
 
 if r[0] < 1.0:
     print("  The microphone barely heard anything, so this says nothing about the")
