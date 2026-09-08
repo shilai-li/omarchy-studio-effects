@@ -333,6 +333,11 @@ pub struct MaskUpscaler {
     x_frac: Vec<u32>,
     /// The 256 mask rows, each stretched to output width.
     band: Vec<u8>,
+    /// The mask quantised to 8-bit once per frame, so the horizontal stretch
+    /// is integer-only. Doing the float clamp at output width instead meant
+    /// two float conversions per column per mask row -- 655k of them at 720p
+    /// -- for a 256x256 source.
+    quantized: Vec<u8>,
     width: usize,
     /// The slice of the mask the output covers, in mask units. The whole mask
     /// when the output is the whole frame; a sub-range when framing has cropped
@@ -349,6 +354,7 @@ impl MaskUpscaler {
             x_idx: vec![0; width],
             x_frac: vec![0; width],
             band: vec![0; NET * width],
+            quantized: vec![0; NET * NET],
             width,
             x0: 0.0,
             x_span: (NET - 1) as f32,
@@ -390,14 +396,17 @@ impl MaskUpscaler {
 
     /// Stretch every mask row to frame width. Once per frame, before blending.
     pub fn prepare(&mut self, mask: &[f32]) {
+        for (q, &v) in self.quantized.iter_mut().zip(mask) {
+            *q = (v.clamp(0.0, 1.0) * 255.0) as u8;
+        }
         for row in 0..NET {
-            let src = &mask[row * NET..(row + 1) * NET];
+            let src = &self.quantized[row * NET..(row + 1) * NET];
             let dst = &mut self.band[row * self.width..(row + 1) * self.width];
             for col in 0..self.width {
                 let i = self.x_idx[col] as usize;
                 let f = self.x_frac[col];
-                let a = (src[i].clamp(0.0, 1.0) * 255.0) as u32;
-                let b = (src[(i + 1).min(NET - 1)].clamp(0.0, 1.0) * 255.0) as u32;
+                let a = u32::from(src[i]);
+                let b = u32::from(src[(i + 1).min(NET - 1)]);
                 dst[col] = ((a * (256 - f) + b * f) >> 8) as u8;
             }
         }
@@ -564,6 +573,45 @@ mod tests {
         up.prepare(&mask);
         assert_eq!(alpha_at(&up, 100, 5, h), 255, "aimed at the white half");
         assert_eq!(alpha_at(&up, 100, h - 5, h), 255);
+    }
+
+    /// Quantising the 256x256 mask first, then stretching in integers, must
+    /// match converting each sample at output width -- the path this replaced.
+    /// A speed change that shifted every alpha by a level would look like a
+    /// soft subject, and a webcam would not catch it.
+    #[test]
+    fn prepare_matches_converting_at_output_width() {
+        let mut mask = vec![0.0f32; NET * NET];
+        for y in 0..NET {
+            for x in 0..NET {
+                mask[y * NET + x] = (x as f32 / NET as f32) * (y as f32 / NET as f32);
+            }
+        }
+        let (w, h) = (1280, 720);
+        let mut up = MaskUpscaler::new(w);
+        up.prepare(&mask);
+
+        let band_at = |row: usize, col: usize| -> u8 {
+            let x = ((NET - 1) as f32 * col as f32 / w as f32).clamp(0.0, (NET - 1) as f32);
+            let i = x as usize;
+            let f = ((x - x.floor()) * 256.0) as u32;
+            let src = &mask[row * NET..(row + 1) * NET];
+            let a = (src[i].clamp(0.0, 1.0) * 255.0) as u32;
+            let b = (src[(i + 1).min(NET - 1)].clamp(0.0, 1.0) * 255.0) as u32;
+            ((a * (256 - f) + b * f) >> 8) as u8
+        };
+
+        for row in (0..h).step_by(13) {
+            for col in (0..w).step_by(17) {
+                let y = ((NET - 1) as f32 * row as f32 / h as f32).clamp(0.0, (NET - 1) as f32);
+                let (r0, f) = (y as usize, ((y - y.floor()) * 256.0) as u32);
+                let r1 = (r0 + 1).min(NET - 1);
+                let want = (u32::from(band_at(r0, col)) * (256 - f)
+                    + u32::from(band_at(r1, col)) * f)
+                    >> 8;
+                assert_eq!(alpha_at(&up, col, row, h), want, "at {col},{row}");
+            }
+        }
     }
 
     /// A saturated mask must stay saturated: fully-foreground pixels have to

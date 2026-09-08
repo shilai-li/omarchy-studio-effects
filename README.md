@@ -262,9 +262,12 @@ pipeline gets measured on a machine with no spare loopback device. `--snapshot`
 writes one processed frame as a PNG, which is the only way to see what the
 composite looks like without one.
 
-Per frame at 720p on the NPU: prep 0.24 ms, inference 0.76 ms, blur 6.41 ms,
-blend 7.34 ms. 1080p currently lands on 33.28 ms and so does not hold 30 fps --
-see AGENTS.md for why that is a blur-and-blend problem, not a model one.
+Per frame on the NPU, USB camera, blur radius 12: **5.28 ms at 720p** (16% of
+the 33 ms budget) and **7.06 ms at 1080p** (21%). 1080p30 fits; it did not at
+first -- the first working version landed on 33.28 ms -- and the gap closed in
+how the pixels are walked, not the model. 720p is still the default because on
+battery the CPU stages roughly double and 1080p leaves little headroom. See
+AGENTS.md for the per-stage numbers.
 
 See [AGENTS.md](AGENTS.md) for the architecture, the measurements it rests on,
 and house style.

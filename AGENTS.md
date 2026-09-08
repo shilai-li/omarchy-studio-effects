@@ -189,12 +189,25 @@ device:
 |---|---|---|---|
 | blend @1080p | 17.11 ms | 1.94 ms | separable integer mask upscale |
 | blur @1080p | 15.15 ms | 4.07 ms | reciprocal multiply, row-major vertical pass |
+| mask prepare @1080p | 0.87 ms | 0.30 ms | quantise 256x256 once, stretch in integers |
+
+The prepare row is an isolated walk of `MaskUpscaler::prepare`, not a full
+pipeline re-time: the daemon was holding the camera when this was measured, so
+the 1.94 ms blend figure above still includes the old prepare. Re-time the
+daemon and fold it in.
 
 **Blend.** The mask arrives at 256x256 and the frame is 2M pixels, so the naive
 version sampled it bilinearly per pixel: four float loads and half a dozen float
 ops, two million times. Separating the axes moves that work off the per-pixel
 path -- one horizontal pass over 256 rows (491k operations), then two byte loads
 and an integer lerp per pixel.
+
+The remaining float work in that horizontal pass was converting every sample at
+output width: two `clamp * 255` per column, 256 rows, 655k conversions at 720p
+for a source that is 65k values. Quantising the mask to bytes once, then
+stretching with the integer lerp the pass already used, is the same arithmetic
+(the test pins that) and drops prepare from 0.59 ms to 0.22 ms at 720p, 0.87 ms
+to 0.30 ms at 1080p.
 
 **Blur.** Two ordinary-looking lines were most of the cost. The window average
 was an integer divide, four million times, by a divisor that never changes; it
@@ -223,9 +236,23 @@ model wants a person filling a reasonable part of the frame; with the subject
 small or far the mask is legitimately near-empty and the whole frame blurs. Reach
 for the tests before the pipeline.
 
-There is also real quality headroomThere is also real quality headroom: 256x256 MediaPipe is the cheap end of the
+There is also real quality headroom: 256x256 MediaPipe is the cheap end of the
 model range, and the budget would carry something much better. Do not spend it
 on a bigger model until the composite is off the CPU.
+
+A few CPU leftovers were measured and left alone, because they do not move the
+needle once LLVM has seen them:
+
+- `blend_*`'s `/ 255` is already a multiply at `opt-level=3`. A hand-written
+  reciprocal is 5% at the compiler's default CPU, and changes mid-alpha by a
+  level.
+- Reusing `box_blur`'s per-call `Vec<u32>` column sums is ~1%.
+- Blurring at half resolution then upscaling is not cheaper: the scale costs
+  what the smaller box saves.
+
+The next real win is still a GPU composite, for the reason already stated:
+sampling is free there. Until then, 720p stays the default because battery
+blur -- 20 ms of a 26 ms frame -- is a CPU walk, not a model.
 
 ## Invariants
 
