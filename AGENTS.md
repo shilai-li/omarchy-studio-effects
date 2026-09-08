@@ -497,6 +497,7 @@ bash test/unit-args-test.sh         # the systemd unit's arguments, against the 
 
 omarchy plugin validate .           # manifest + entry points
 bash test/model-test.sh             # Model.js under plain node, no compositor
+bash test/voice-check.sh            # does Voice Focus pass your voice? (talk into it)
 
 # Reinstall AND restart, in that order. Reinstalling alone leaves the running
 # shell on the cached Model.js, which fails as a widget that does nothing rather

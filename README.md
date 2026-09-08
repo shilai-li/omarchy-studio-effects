@@ -170,6 +170,13 @@ device from every application's list. An app that had it selected loses its
 microphone. (Studio Camera does not have this problem: its loopback is a
 separate always-on service.)
 
+If your voice is not coming through, this says whether the microphone or the
+filter is at fault — it records both at once and compares them:
+
+```bash
+bash test/voice-check.sh    # then talk for five seconds
+```
+
 ## Changing things without restarting
 
 Editing the config and restarting drops the camera for a second, which on a
