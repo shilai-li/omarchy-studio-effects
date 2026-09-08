@@ -340,6 +340,16 @@ by restarting the service with `voice_focus` already default and watching the
 capture land on the hardware microphone. **Kill stray instances before
 concluding anything about routing.**
 
+**Measuring audio here is harder than it looks, and three separate mistakes
+each read as "silence".** Record with `timeout -s INT`, not plain `timeout`:
+SIGTERM leaves `pw-record` a file with no data chunk, which reads as silence
+rather than as a broken file. Target nodes by **name**, never by the id from
+`wpctl status`: ids are reassigned constantly and a stale one records from
+whatever now holds it. And never test a denoiser with a sine wave -- RNNoise is
+built to remove exactly that, so a pure tone proves nothing either way. Use a
+broadband, amplitude-modulated signal, and always record the raw microphone in
+the *same run* to prove the sound reached it at all.
+
 **Ports existing does not mean the graph runs.** A filter-chain publishes its
 ports from the config before the graph is verified, so `pw-link` showed
 `voice_focus:capture_FL` and `capture_FR` for a graph that was refusing to start
@@ -347,14 +357,27 @@ and producing pure silence. Checking the port list looked like verification and
 was not. Read the log: `pipewire -c <conf>` with `log.level = 2` says exactly
 what is wrong, and a working graph reports no error at all.
 
-**A mono source is honest and comes out of one speaker.** The microphone is
-mono and `noise_suppressor_mono` produces one channel, so the obvious graph
-publishes a single MONO port. Consumers are supposed to upmix that; enough of
-them instead map it to front-left and leave the right silent that "my voice only
-comes out of the left speaker" is the expected outcome rather than bad luck. The
-graph therefore names the filter's output twice, so the same denoised signal
-feeds FL and FR. It is the same audio in both -- a stereo microphone this is
-not -- but it plays where people expect.
+**The voice source is mono, and every attempt to change that breaks it.** A
+mono microphone monitored through stereo speakers can come out of the left one
+only, which invites a fix. Both obvious fixes stop the graph dead. Measured
+against a tone the microphone could hear at 10%:
+
+| graph | result |
+|---|---|
+| one output, mono | passes audio, no error |
+| two outputs via a `copy` node | exact silence, graph errors |
+| one output, stereo `playback.props` | exact silence, graph errors |
+
+Naming one output port twice fails outright ("already used as output 0, use
+copy"); routing through a `copy` node clears *that* error and still produces
+nothing. So the config leaves the graph to work out its own ports and publishes
+`capture_MONO`. A microphone that plays out of one speaker while being monitored
+is a far smaller problem than one that produces nothing at all, and what reaches
+the far end of a call is mono either way.
+
+Setting `audio.channels` or `audio.position` on `capture.props` is separately
+wrong: it made the capture node adopt the microphone array's four channels
+rather than downmixing to the one the mono plugin wants.
 
 **Framing is a problem about holding still, not about tracking.** Finding the
 subject is free -- the mask is already a per-pixel map of them, so `subject_box`
