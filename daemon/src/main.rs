@@ -43,6 +43,21 @@ struct Args {
     #[arg(long, default_value_t = 30)]
     fps: u32,
 
+    /// Capture from the camera at this size and publish at --width/--height.
+    ///
+    /// Only useful with framing. The crop is taken from the captured frame and
+    /// scaled to the output, so capturing larger gives the crop real pixels to
+    /// use: from 1920x1080 down to a 1280x720 output, zooming to 150% costs no
+    /// sharpness at all, where capturing at the output size has to upscale.
+    ///
+    /// Zero follows --width/--height, which is what you want without framing --
+    /// capturing larger then costs a rescale of every frame for nothing.
+    #[arg(long, default_value_t = 0)]
+    capture_width: u32,
+
+    #[arg(long, default_value_t = 0)]
+    capture_height: u32,
+
     /// Force a device instead of taking the best available (NPU, GPU, CPU).
     #[arg(long, value_parser = parse_device)]
     device: Option<String>,
@@ -237,11 +252,15 @@ fn main() -> Result<()> {
 
     // decodebin because a USB camera hands over MJPEG while a loopback hands
     // over raw NV12, and the daemon should not care which.
+    // Zero means "same as the output", which is the ordinary case.
+    let cap_w = if args.capture_width == 0 { args.width } else { args.capture_width };
+    let cap_h = if args.capture_height == 0 { args.height } else { args.capture_height };
+
     let src = format!(
         "v4l2src device={} ! decodebin ! videoconvert ! videoscale \
          ! video/x-raw,format=NV12,width={},height={},framerate={}/1 \
          ! appsink name=sink max-buffers=2 drop=true sync=false",
-        input, args.width, args.height, args.fps
+        input, cap_w, cap_h, args.fps
     );
     let pipeline = gst::parse::launch(&src)
         .context("building the capture pipeline")?
@@ -294,7 +313,29 @@ fn main() -> Result<()> {
     // frame is a dark one that says nothing about mask quality.
     let snapshot_at = 30;
 
+    // `w`/`h` are the output, which is what everything downstream of the
+    // resample works in. The capture size is only the segmentation's and the
+    // crop's business.
     let (w, h) = (args.width as usize, args.height as usize);
+    let (cw, ch) = (cap_w as usize, cap_h as usize);
+    let scaling = (cw, ch) != (w, h);
+    if scaling {
+        println!("capturing {cap_w}x{cap_h}, publishing {}x{}", args.width, args.height);
+    }
+
+    // The published frame, built fresh each time rather than copied from the
+    // input: the input is the capture size and this is the output size.
+    let out_info = gst_video::VideoInfo::builder(gst_video::VideoFormat::Nv12, args.width, args.height)
+        .fps(gst::Fraction::new(args.fps as i32, 1))
+        .build()?;
+    let out_y_stride = out_info.stride()[0] as usize;
+    let out_uv_stride = out_info.stride()[1] as usize;
+
+    // The sharp frame at output size: the capture, cropped and scaled. The
+    // composite needs it alongside the blurred copy, so it cannot be built in
+    // place.
+    let mut sharp_y = vec![0u8; out_y_stride * h];
+    let mut sharp_uv = vec![0u8; out_uv_stride * h.div_ceil(2)];
     let mut scratch = vec![0u8; w * h];
     let mut upscaler = nv12::MaskUpscaler::new(w);
     let mut mask_filter = mask::MaskFilter::new(args.mask_gain, args.mask_smoothing);
@@ -355,16 +396,14 @@ fn main() -> Result<()> {
     let mut preview: Option<preview::Preview> = None;
 
     let mut framer = framing::Framing::new(
-        args.width,
-        args.height,
+        cap_w,
+        cap_h,
         args.framing_zoom as f32 / 100.0,
         args.framing_dead_zone,
         args.framing_smoothing,
     );
     let mut resampler = nv12::Resampler::new(w);
     let mut resampler_uv = nv12::Resampler::new(w / 2);
-    let mut crop_y = vec![0u8; w * h];
-    let mut crop_uv = vec![0u8; w * h / 2];
     let mut aimed: Option<framing::Rect> = None;
 
     // A frame left by a daemon that was killed rather than shut down is a
@@ -391,13 +430,12 @@ fn main() -> Result<()> {
         let y_stride = info.stride()[0] as usize;
         let uv_stride = info.stride()[1] as usize;
 
-        let mut dst = src_buf.copy_deep()?;
         let in_frame = gst_video::VideoFrameRef::from_buffer_ref_readable(src_buf, &info)?;
         let y_in = in_frame.plane_data(0)?;
         let uv_in = in_frame.plane_data(1)?;
 
         let t = Instant::now();
-        nv12::write_model_input(y_in, uv_in, w, h, y_stride, uv_stride, seg.input_buffer()?);
+        nv12::write_model_input(y_in, uv_in, cw, ch, y_stride, uv_stride, seg.input_buffer()?);
         timings.prep += t.elapsed().as_secs_f64() * 1e3;
 
         // Read once per frame: the socket thread may change these at any point,
@@ -413,19 +451,82 @@ fn main() -> Result<()> {
         timings.infer += t.elapsed().as_secs_f64() * 1e3;
         mask_filter.apply(&mut mask);
 
+        // Which part of the captured frame the output shows. The whole of it
+        // unless framing has cropped in.
+        let t = Instant::now();
+        let crop = if want_framing {
+            framer.set_max_zoom(zoom as f32 / 100.0);
+            framer.update(&mask)
+        } else {
+            None
+        }
+        .unwrap_or(framing::Rect { x: 0.0, y: 0.0, w: cw as f32, h: ch as f32 });
+
+        // Crop and scale into the sharp output-sized frame. Done before the
+        // composite, not after: blurring at the capture size would throw away
+        // the whole point of capturing larger, since the expensive stages would
+        // run on the bigger frame and then be scaled down.
+        if aimed != Some(crop) {
+            resampler.aim(crop.x, crop.w, cw);
+            resampler_uv.aim(crop.x / 2.0, crop.w / 2.0, cw / 2);
+            upscaler.aim(
+                crop.x * (nv12::NET - 1) as f32 / cw as f32,
+                crop.w * (nv12::NET - 1) as f32 / cw as f32,
+                crop.y * (nv12::NET - 1) as f32 / ch as f32,
+                crop.h * (nv12::NET - 1) as f32 / ch as f32,
+            );
+            aimed = Some(crop);
+        }
+        // Nothing to scale and nothing cropped away: a straight row copy,
+        // which is what this used to do. Resampling a frame onto itself is
+        // three milliseconds of bilinear arithmetic for an identity, and most
+        // frames are this case -- framing off, capture the same size as output.
+        let untouched = !scaling
+            && crop.x == 0.0
+            && crop.y == 0.0
+            && crop.w == cw as f32
+            && crop.h == ch as f32;
+        if untouched {
+            for row in 0..h {
+                sharp_y[row * out_y_stride..row * out_y_stride + w]
+                    .copy_from_slice(&y_in[row * y_stride..row * y_stride + w]);
+            }
+            for row in 0..h / 2 {
+                sharp_uv[row * out_uv_stride..row * out_uv_stride + w]
+                    .copy_from_slice(&uv_in[row * uv_stride..row * uv_stride + w]);
+            }
+        } else {
+            resampler.luma(y_in, &mut sharp_y, y_stride, out_y_stride, h, crop.y, crop.h, ch);
+            resampler_uv.chroma(
+                uv_in, &mut sharp_uv, uv_stride, out_uv_stride, h / 2,
+                crop.y / 2.0, crop.h / 2.0, ch / 2,
+            );
+        }
+        timings.frame += t.elapsed().as_secs_f64() * 1e3;
+
+        let mut dst = gst::Buffer::with_size(out_info.size())?;
         {
-            let dst_ref = dst.get_mut().context("output buffer was not writable")?;
-            let mut out_frame = gst_video::VideoFrameRef::from_buffer_ref_writable(dst_ref, &info)?;
+            let dst_ref = dst.get_mut().expect("a freshly made buffer is writable");
+            let mut out_frame = gst_video::VideoFrameRef::from_buffer_ref_writable(dst_ref, &out_info)?;
             let [y_out, uv_out, _, _] = out_frame.planes_data_mut();
 
-            // Build the background over the whole frame, then paint the sharp
-            // subject back on top. Doing it this way means neither the blur nor
-            // the image copy has to know anything about the mask.
+            // The background starts as a copy of the sharp frame; the subject
+            // is painted back over it afterwards. Neither the blur nor the
+            // image copy has to know anything about the mask this way.
+            for row in 0..h {
+                y_out[row * out_y_stride..row * out_y_stride + w]
+                    .copy_from_slice(&sharp_y[row * out_y_stride..row * out_y_stride + w]);
+            }
+            for row in 0..h / 2 {
+                uv_out[row * out_uv_stride..row * out_uv_stride + w]
+                    .copy_from_slice(&sharp_uv[row * out_uv_stride..row * out_uv_stride + w]);
+            }
+
             let t = Instant::now();
             match effect {
                 Effect::Replace => {
                     if let Some(bg) = &backdrop {
-                        bg.paint(y_out, uv_out, w, h, y_stride, uv_stride);
+                        bg.paint(y_out, uv_out, w, h, out_y_stride, out_uv_stride);
                     }
                 }
                 Effect::Blur => {
@@ -433,8 +534,8 @@ fn main() -> Result<()> {
                     // the point where the boxiness stops being visible against
                     // a hard edge, which is why it is the default.
                     for _ in 0..passes {
-                        nv12::box_blur(y_out, &mut scratch, w, h, y_stride, blur_radius);
-                        nv12::box_blur(uv_out, &mut scratch, w, h / 2, uv_stride, blur_radius / 2);
+                        nv12::box_blur(y_out, &mut scratch, w, h, out_y_stride, blur_radius);
+                        nv12::box_blur(uv_out, &mut scratch, w, h / 2, out_uv_stride, blur_radius / 2);
                     }
                 }
                 Effect::None => {}
@@ -443,55 +544,18 @@ fn main() -> Result<()> {
             // On the background only, and before the blend, so the subject is
             // never dimmed or drained along with what is behind them.
             if effect != Effect::None {
-                nv12::tint(y_out, uv_out, w, h, y_stride, uv_stride, dim, desat);
+                nv12::tint(y_out, uv_out, w, h, out_y_stride, out_uv_stride, dim, desat);
             }
             timings.blur += t.elapsed().as_secs_f64() * 1e3;
 
             let t = Instant::now();
             if effect != Effect::None {
                 upscaler.prepare(&mask);
-                nv12::blend_luma(y_in, y_out, &upscaler, w, h, y_stride);
-                nv12::blend_chroma(uv_in, uv_out, &upscaler, w / 2, h / 2, uv_stride);
+                nv12::blend_luma(&sharp_y, y_out, &upscaler, w, h, out_y_stride);
+                nv12::blend_chroma(&sharp_uv, uv_out, &upscaler, w / 2, h / 2, out_uv_stride);
             }
             timings.blend += t.elapsed().as_secs_f64() * 1e3;
         }
-
-        // Framing crops the finished picture and scales it back up. Done last
-        // so the segmentation and the composite always see the whole frame: a
-        // subject who steps outside the crop still has to be found, or the
-        // camera could never follow them back.
-        let t = Instant::now();
-        if want_framing {
-            framer.set_max_zoom(zoom as f32 / 100.0);
-            let rect = framer.update(&mask);
-            if let Some(r) = rect {
-                let dst_ref = dst.get_mut().context("output buffer was not writable")?;
-                let mut frame = gst_video::VideoFrameRef::from_buffer_ref_writable(dst_ref, &info)?;
-                let [y_out, uv_out, _, _] = frame.planes_data_mut();
-
-                // The weights only change when the crop does, and the crop is
-                // deliberately still most of the time.
-                if aimed != Some(r) {
-                    resampler.aim(r.x, r.w, w);
-                    resampler_uv.aim(r.x / 2.0, r.w / 2.0, w / 2);
-                    aimed = Some(r);
-                }
-
-                resampler.luma(y_out, &mut crop_y, y_stride, w, h, r.y, r.h, h);
-                resampler_uv.chroma(
-                    uv_out, &mut crop_uv, uv_stride, w, h / 2, r.y / 2.0, r.h / 2.0, h / 2,
-                );
-                for row in 0..h {
-                    y_out[row * y_stride..row * y_stride + w]
-                        .copy_from_slice(&crop_y[row * w..(row + 1) * w]);
-                }
-                for row in 0..h / 2 {
-                    uv_out[row * uv_stride..row * uv_stride + w]
-                        .copy_from_slice(&crop_uv[row * w..(row + 1) * w]);
-                }
-            }
-        }
-        timings.frame += t.elapsed().as_secs_f64() * 1e3;
 
         drop(in_frame);
 
@@ -510,7 +574,7 @@ fn main() -> Result<()> {
                 // A failed preview is a stale picture in a widget. That is not
                 // a reason to drop somebody's video call, so it is reported
                 // once and the frame loop carries on.
-                if let Err(e) = p.offer(&dst, &info) {
+                if let Err(e) = p.offer(&dst, &out_info) {
                     eprintln!("preview frame dropped: {e:#}");
                 }
             }
@@ -521,7 +585,7 @@ fn main() -> Result<()> {
         if let Some(path) = &args.snapshot {
             frame_no += 1;
             if frame_no >= snapshot_at {
-                write_png(&dst, &info, path)?;
+                write_png(&dst, &out_info, path)?;
                 println!("wrote {path}");
                 break;
             }

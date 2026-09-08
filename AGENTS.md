@@ -416,7 +416,24 @@ while framing is on, not fixed at startup. It defaults to 2x rather than
 something tighter for the same reason: someone well back from the camera needs
 the room, and a cap that never binds for a close subject is invisible to them.
 
-The crop runs **last**, after segmentation and compositing, so both always see
+**Capture can be larger than output, and the composite still runs at output
+size.** Framing crops and scales back up, so cropping from a frame the same size
+as the output always costs sharpness. Capturing 1920x1080 for a 1280x720 output
+gives the crop real pixels: zooming to 150% is then a straight 1:1 read.
+
+The order this demands is resample **first**, composite after. Blurring at the
+capture size and scaling down afterwards would run the expensive stages on the
+bigger frame for nothing -- 26.21 ms against 12.26 for the same output. It costs
+about 2 ms, and only when it is actually doing something: an uncropped frame at
+matching sizes takes a row copy rather than a bilinear identity, which is worth
+3 ms a frame in the common case.
+
+The consequence is that the mask must be read over the crop rather than the
+whole frame, which is what `MaskUpscaler::aim` is for. Get that wrong and the
+cut-out drifts away from the person.
+
+The crop runs **last** in the sense that matters -- segmentation still sees the
+whole captured frame, so both always see
 the whole frame. A subject who walks outside the crop still has to be findable,
 or the camera could never follow them back.
 

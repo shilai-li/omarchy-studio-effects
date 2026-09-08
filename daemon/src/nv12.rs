@@ -331,26 +331,60 @@ pub struct MaskUpscaler {
     /// toward the next one.
     x_idx: Vec<u32>,
     x_frac: Vec<u32>,
-    /// The 256 mask rows, each stretched to full frame width.
+    /// The 256 mask rows, each stretched to output width.
     band: Vec<u8>,
     width: usize,
+    /// The slice of the mask the output covers, in mask units. The whole mask
+    /// when the output is the whole frame; a sub-range when framing has cropped
+    /// into it, because the output then shows only part of what was segmented.
+    x0: f32,
+    x_span: f32,
+    y0: f32,
+    y_span: f32,
 }
 
 impl MaskUpscaler {
     pub fn new(width: usize) -> Self {
-        let mut x_idx = Vec::with_capacity(width);
-        let mut x_frac = Vec::with_capacity(width);
-        for col in 0..width {
-            // Fixed point with an 8-bit fraction, so the lerp stays in integers.
-            let fx = col * (NET - 1) * 256 / width;
-            x_idx.push((fx >> 8) as u32);
-            x_frac.push((fx & 0xff) as u32);
-        }
-        Self {
-            x_idx,
-            x_frac,
+        let mut me = Self {
+            x_idx: vec![0; width],
+            x_frac: vec![0; width],
             band: vec![0; NET * width],
             width,
+            x0: 0.0,
+            x_span: (NET - 1) as f32,
+            y0: 0.0,
+            y_span: (NET - 1) as f32,
+        };
+        me.recompute_columns();
+        me
+    }
+
+    /// Point the upscaler at the part of the mask the output actually shows.
+    ///
+    /// Given in mask units so the caller does the one conversion from its own
+    /// crop rectangle, rather than this having to know about capture sizes.
+    /// Both spans are the *whole* mask by default, which is the uncropped case.
+    pub fn aim(&mut self, x0: f32, x_span: f32, y0: f32, y_span: f32) {
+        let limit = (NET - 1) as f32;
+        let changed = self.x0 != x0 || self.x_span != x_span;
+        self.x0 = x0.clamp(0.0, limit);
+        self.x_span = x_span.clamp(1.0, limit);
+        self.y0 = y0.clamp(0.0, limit);
+        self.y_span = y_span.clamp(1.0, limit);
+        // The column table only depends on the horizontal aim, and framing
+        // holds still most of the time by design.
+        if changed {
+            self.recompute_columns();
+        }
+    }
+
+    fn recompute_columns(&mut self) {
+        for col in 0..self.width {
+            // Fixed point with an 8-bit fraction, so the lerp stays in integers.
+            let x = self.x0 + self.x_span * col as f32 / self.width as f32;
+            let x = x.clamp(0.0, (NET - 1) as f32);
+            self.x_idx[col] = x as u32;
+            self.x_frac[col] = ((x - x.floor()) * 256.0) as u32;
         }
     }
 
@@ -373,8 +407,9 @@ impl MaskUpscaler {
     /// 0..=256 weight toward the second.
     #[inline]
     fn rows(&self, row: usize, height: usize) -> (&[u8], &[u8], u32) {
-        let fy = row * (NET - 1) * 256 / height;
-        let (r0, f) = (fy >> 8, (fy & 0xff) as u32);
+        let y = self.y0 + self.y_span * row as f32 / height as f32;
+        let y = y.clamp(0.0, (NET - 1) as f32);
+        let (r0, f) = (y as usize, ((y - y.floor()) * 256.0) as u32);
         let r1 = (r0 + 1).min(NET - 1);
         (
             &self.band[r0 * self.width..(r0 + 1) * self.width],
@@ -481,6 +516,54 @@ mod tests {
         // The band quantises the mask to 8 bits and each axis rounds again, so
         // three levels out of 255 is the floor for this representation, not slack.
         assert!(worst <= 3.0, "worst deviation {worst} of 255");
+    }
+
+    /// Aiming at half the mask must show that half stretched across the whole
+    /// output. This is what makes the composite line up with a framing crop:
+    /// the output shows part of what was segmented, so the mask has to be read
+    /// over that part only.
+    #[test]
+    fn aiming_at_part_of_the_mask_stretches_that_part() {
+        // Left half black, right half white.
+        let mut mask = vec![0.0f32; NET * NET];
+        for y in 0..NET {
+            for x in NET / 2..NET {
+                mask[y * NET + x] = 1.0;
+            }
+        }
+        let (w, h) = (640, 360);
+
+        // Whole mask: the split lands in the middle of the output.
+        let mut whole = MaskUpscaler::new(w);
+        whole.prepare(&mask);
+        assert_eq!(alpha_at(&whole, 10, 0, h), 0, "far left is background");
+        assert_eq!(alpha_at(&whole, w - 10, 0, h), 255, "far right is foreground");
+
+        // Right half only: the output should be foreground throughout.
+        let mut right = MaskUpscaler::new(w);
+        right.aim((NET / 2) as f32, (NET / 2 - 1) as f32, 0.0, (NET - 1) as f32);
+        right.prepare(&mask);
+        assert_eq!(alpha_at(&right, 10, 0, h), 255, "aimed at the white half");
+        assert_eq!(alpha_at(&right, w - 10, 0, h), 255);
+    }
+
+    /// The vertical aim has to move independently, or a crop that is offset
+    /// only in y would sample the wrong rows.
+    #[test]
+    fn the_vertical_aim_moves_on_its_own() {
+        // Top half black, bottom half white.
+        let mut mask = vec![0.0f32; NET * NET];
+        for y in NET / 2..NET {
+            for x in 0..NET {
+                mask[y * NET + x] = 1.0;
+            }
+        }
+        let (w, h) = (640, 360);
+        let mut up = MaskUpscaler::new(w);
+        up.aim(0.0, (NET - 1) as f32, (NET / 2) as f32, (NET / 2 - 1) as f32);
+        up.prepare(&mask);
+        assert_eq!(alpha_at(&up, 100, 5, h), 255, "aimed at the white half");
+        assert_eq!(alpha_at(&up, 100, h - 5, h), 255);
     }
 
     /// A saturated mask must stay saturated: fully-foreground pixels have to

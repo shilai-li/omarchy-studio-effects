@@ -124,6 +124,20 @@ it needs no face detector and no second model. It crops and scales rather than
 moving anything, so it costs resolution: about 11 ms a frame at 1080p, the most
 expensive thing here, which is why it is off unless you ask for it.
 
+If you sit far back, capture larger than you publish — the crop then has real
+pixels to use instead of upscaling:
+
+```conf
+WIDTH=1280
+HEIGHT=720
+CAPTURE_WIDTH=1920
+CAPTURE_HEIGHT=1080
+```
+
+Zooming to 150% is then a straight 1:1 read with no softness at all, and it
+costs about 2 ms a frame because blur and compositing still run at the output
+size.
+
 It is built to move as little as possible. You can drift a little without the
 camera reacting at all, a real move is followed slowly, and stepping out of shot
 holds the frame rather than snapping back — a camera that tracks every twitch

@@ -26,6 +26,8 @@ Type=simple
 Environment=INPUT=/dev/video0
 Environment=WIDTH=1280
 Environment=HEIGHT=720
+Environment=CAPTURE_WIDTH=0
+Environment=CAPTURE_HEIGHT=0
 Environment=BLUR=12
 Environment=PASSES=2
 Environment=DIM=0
@@ -45,6 +47,8 @@ ExecStart=/usr/bin/studio-effects-daemon \
     --output "Studio Camera" \
     --width ${WIDTH} \
     --height ${HEIGHT} \
+    --capture-width ${CAPTURE_WIDTH} \
+    --capture-height ${CAPTURE_HEIGHT} \
     --blur ${BLUR} \
     --passes ${PASSES} \
     --dim ${DIM} \
