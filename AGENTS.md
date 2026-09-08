@@ -151,6 +151,26 @@ Two honesty notes on that table, because both are easy to get wrong:
   NPU's advantage from 7x to 35x. Never benchmark the CPU plugin at defaults for
   a fixed-cadence workload; pass `INFERENCE_NUM_THREADS: 1` as `load.py` does.
 
+### Every number here was measured on AC, and battery is a different machine
+
+On battery with the balanced profile the governor drops to `powersave` and the
+cores sit around 1.2 GHz. The CPU stages roughly double; the NPU barely moves:
+
+| stage, 1080p, 2 blur passes | on AC | on battery |
+|---|---|---|
+| blur | 9.11 ms | 20.01 ms |
+| blend | 1.89 ms | 4.65 ms |
+| **inference (NPU)** | **0.90 ms** | **1.04 ms** |
+| total | 10.48 ms (32%) | 26.21 ms (79%) |
+
+That 2.2x on blur against 1.16x on inference is the clearest evidence for the
+whole design: the part running on the NPU is nearly immune to the power limit
+that halves everything on the CPU. It is also why 720p is the default -- on
+battery, which is when a laptop is on a call, 1080p leaves little headroom and
+1080p with framing has none (96%).
+
+Re-measure on battery before believing any budget claim in this file.
+
 ### What the daemon actually costs
 
 `studio-effects-daemon`, per frame, USB camera, NPU, blur radius 12:
