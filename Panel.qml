@@ -449,8 +449,11 @@ Panel {
           width: parent.width
           visible: !root.running && !root.switching
           textFormat: Text.PlainText
-          text: "The camera is released and the NPU is idle. Turning this on "
-              + "opens your camera; the recording light will come on."
+          // A status line, not a caution. The earlier wording spelled out that
+          // turning the camera on would light the recording LED, which is both
+          // obvious and alarming to read while everything is switched off --
+          // it was taken as a warning that something was wrong.
+          text: "Nothing is running. The camera is closed and the NPU is idle."
           color: root.dim
           font.family: root.contentFontFamily
           font.pixelSize: Style.font.caption
