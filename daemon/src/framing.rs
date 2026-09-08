@@ -40,6 +40,15 @@ pub struct Framing {
 }
 
 impl Framing {
+    /// Change how far in the framing may crop, while running.
+    ///
+    /// Live rather than fixed at construction because it is the setting people
+    /// actually reach for: how close the camera comes is the whole visible
+    /// behaviour, and it depends on how far away they happen to be sitting.
+    pub fn set_max_zoom(&mut self, max_zoom: f32) {
+        self.max_zoom = max_zoom.clamp(1.0, 3.0);
+    }
+
     pub fn new(width: u32, height: u32, max_zoom: f32, dead_zone: f32, smoothing: f32) -> Self {
         Self {
             current: None,
@@ -231,5 +240,36 @@ mod tests {
         // A tiny subject would otherwise ask for an enormous crop-in.
         let r = f.update(&mask_with(126, 126, 130, 130)).unwrap();
         assert!(r.w >= 1280.0 / 1.6 - 1.0, "cropped to {}, past the cap", r.w);
+    }
+
+    /// Someone sitting far away is exactly who needs the cap raised, so raising
+    /// it has to actually crop closer rather than being clamped somewhere else.
+    #[test]
+    fn a_higher_zoom_crops_closer_on_a_distant_subject() {
+        let distant = mask_with(120, 110, 140, 170);
+
+        let mut tight = Framing::new(1280, 720, 1.6, 0.06, 0.92);
+        let a = tight.update(&distant).unwrap();
+
+        let mut closer = Framing::new(1280, 720, 2.5, 0.06, 0.92);
+        let b = closer.update(&distant).unwrap();
+
+        assert!(b.w < a.w, "2.5x should crop tighter than 1.6x: {} vs {}", b.w, a.w);
+        assert!(b.w >= 1280.0 / 2.5 - 1.0, "and still respect its own cap: {}", b.w);
+    }
+
+    /// Changing the limit while running must take effect on the next frame.
+    #[test]
+    fn the_zoom_limit_can_be_changed_while_running() {
+        let distant = mask_with(120, 110, 140, 170);
+        let mut f = framing();
+        let before = f.update(&distant).unwrap();
+        f.set_max_zoom(2.6);
+        // Settle, since the crop eases toward its target rather than jumping.
+        let mut after = before;
+        for _ in 0..200 {
+            after = f.update(&distant).unwrap();
+        }
+        assert!(after.w < before.w, "should crop closer: {} vs {}", after.w, before.w);
     }
 }

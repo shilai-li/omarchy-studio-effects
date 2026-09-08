@@ -51,6 +51,10 @@ pub struct Settings {
     pub desat: u32,
     /// Track the subject and keep them centred.
     pub framing: bool,
+    /// How far the framing may crop in, as a percentage: 160 is 1.6x. A
+    /// percentage rather than a float because the socket takes integers, and a
+    /// setting the panel steps needs to be one.
+    pub zoom: u32,
     /// What `toggle` should return to. Without this, turning effects off and on
     /// again would silently demote a replaced background to a blur.
     pub resume: Effect,
@@ -88,13 +92,14 @@ fn escape(text: &str) -> String {
 
 fn json(settings: &Settings, fixed: &Fixed, error: Option<&str>) -> String {
     let mut out = format!(
-        r#"{{"effect":"{}","blur":{},"passes":{},"dim":{},"desat":{},"framing":{},"device":"{}","input":"{}","output":"{}","width":{},"height":{},"background":{},"preview":{},"previewPath":"{}""#,
+        r#"{{"effect":"{}","blur":{},"passes":{},"dim":{},"desat":{},"framing":{},"zoom":{},"device":"{}","input":"{}","output":"{}","width":{},"height":{},"background":{},"preview":{},"previewPath":"{}""#,
         settings.effect.as_str(),
         settings.blur,
         settings.passes,
         settings.dim,
         settings.desat,
         settings.framing,
+        settings.zoom,
         fixed.device,
         fixed.input,
         fixed.output,
@@ -158,6 +163,10 @@ fn handle(line: &str, settings: &Mutex<Settings>, fixed: &Fixed) -> String {
             Some("off") | None => s.framing = false,
             _ => error = Some("usage: framing on|off"),
         },
+        "zoom" => match arg.and_then(|a| a.parse::<u32>().ok()) {
+            Some(n) if (100..=300).contains(&n) => s.zoom = n,
+            _ => error = Some("usage: zoom <100-300>"),
+        },
         "dim" => match arg.and_then(|a| a.parse::<u32>().ok()) {
             Some(n) if n <= 100 => s.dim = n,
             _ => error = Some("usage: dim <0-100>"),
@@ -166,7 +175,7 @@ fn handle(line: &str, settings: &Mutex<Settings>, fixed: &Fixed) -> String {
             Some(n) if n <= 100 => s.desat = n,
             _ => error = Some("usage: desat <0-100>"),
         },
-        _ => error = Some("unknown command; try status, effect, toggle, preview, framing, blur, passes, dim or desat"),
+        _ => error = Some("unknown command; try status, effect, toggle, preview, framing, zoom, blur, passes, dim or desat"),
     }
 
     json(&s, fixed, error)
@@ -242,6 +251,7 @@ mod tests {
             dim: 0,
             desat: 0,
             framing: false,
+            zoom: 200,
             resume: Effect::Blur,
             has_background,
             preview: false,
@@ -293,6 +303,16 @@ mod tests {
         assert!(handle("passes 3", &s, &fixed()).contains(r#""passes":3"#));
         assert!(handle("dim 40", &s, &fixed()).contains(r#""dim":40"#));
         assert!(handle("desat 100", &s, &fixed()).contains(r#""desat":100"#));
+    }
+
+    #[test]
+    fn zoom_is_clamped_to_a_range_the_framing_accepts() {
+        let s = settings(false);
+        assert!(handle("zoom 250", &s, &fixed()).contains(r#""zoom":250"#));
+        for bad in ["zoom 99", "zoom 301", "zoom 0", "zoom lots"] {
+            assert!(handle(bad, &s, &fixed()).contains(r#""error""#), "{bad} should be refused");
+        }
+        assert!(handle("status", &s, &fixed()).contains(r#""zoom":250"#), "refusals must not change it");
     }
 
     #[test]

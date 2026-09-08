@@ -256,6 +256,23 @@ check("the cursor opens on the effect that is on, counting param rows", () => {
 
 // ---- Auto framing.
 
+check("zoom is offered only while framing is on", () => {
+  const all = '"blur":12,"passes":2,"dim":0,"desat":0,"zoom":200'
+  const keys = json => M.panelRows(M.parseStatus(json)).filter(r => r.kind === "param").map(r => r.key)
+
+  // Framing off: a zoom slider would adjust something with no visible effect.
+  ok(keys('{"effect":"blur","framing":false,' + all + '}').indexOf("zoom") === -1,
+     "zoom must be hidden while framing is off")
+  ok(keys('{"effect":"blur","framing":true,' + all + '}').indexOf("zoom") !== -1,
+     "zoom must appear once framing is on")
+})
+
+check("zoom is clamped to what the daemon accepts", () => {
+  eq(M.paramCommand("zoom", 500), [M.BINARY, "zoom", "300"])
+  eq(M.paramCommand("zoom", 10), [M.BINARY, "zoom", "100"])
+  eq(M.stepParam({ zoom: 300 }, "zoom", 1), 300, "clamped at the top")
+})
+
 check("framing is offered with the effects, not under one of them", () => {
   // Worth having with no background effect at all.
   const off = M.parseStatus('{"effect":"none","blur":12,"framing":false}')

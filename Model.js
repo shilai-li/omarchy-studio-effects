@@ -104,7 +104,12 @@ function blurCommand(radius) {
 // the range of anything and the daemon is never sent a value it will refuse.
 // Ranges here mirror the daemon's; it clamps too, and disagreeing shows up as a
 // refusal rather than as a wrong picture.
+// `needs` names a toggle that must be on for the setting to be worth showing.
+// A zoom slider while framing is off adjusts something with no visible effect,
+// which is the same trap as offering a blur radius to a replaced background.
 var PARAMS = [
+    { key: "zoom",   label: "Zoom in",    min: 100, max: 300, step: 20,
+      effects: ["none", "blur", "replace"], needs: "framing" },
     { key: "blur",   label: "Blur",       min: 0, max: 200, step: 6,  effects: ["blur"] },
     { key: "passes", label: "Smoothness", min: 1, max: 3,   step: 1,  effects: ["blur"] },
     { key: "dim",    label: "Darken",     min: 0, max: 100, step: 10, effects: ["blur", "replace"] },
@@ -189,6 +194,7 @@ function panelRows(state) {
     for (var j = 0; j < PARAMS.length; j++) {
         if (PARAMS[j].effects.indexOf(current) === -1) continue;
         if (!supports[PARAMS[j].key]) continue;
+        if (PARAMS[j].needs && !toggleValue(state, PARAMS[j].needs)) continue;
         rows.push({ kind: "param", effect: "", key: PARAMS[j].key });
     }
     return rows;
@@ -224,6 +230,7 @@ function unknownState(reason) {
         background: false,
         width: 0,
         height: 0,
+        zoom: 100,
         passes: 1,
         dim: 0,
         desat: 0,
@@ -260,6 +267,7 @@ function parseStatus(text) {
         // Read by name from PARAMS so adding a setting in one place is enough;
         // forgetting this step showed every new slider sitting at its minimum
         // while the daemon was plainly using something else.
+        zoom: clampParam("zoom", parsed.zoom),
         passes: clampParam("passes", parsed.passes),
         dim: clampParam("dim", parsed.dim),
         desat: clampParam("desat", parsed.desat),

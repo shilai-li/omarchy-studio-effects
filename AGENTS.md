@@ -410,6 +410,12 @@ that follows every twitch is worse than one that never moves -- the viewer sees
 the room sliding behind a subject who appears pinned, and reads it as a broken
 camera. The tests are written against that, not against tracking accuracy.
 
+How far it crops is the one thing people reach for, because it depends entirely
+on how far away they sit -- so the limit is live-adjustable and shown as a slider
+while framing is on, not fixed at startup. It defaults to 2x rather than
+something tighter for the same reason: someone well back from the camera needs
+the room, and a cap that never binds for a close subject is invisible to them.
+
 The crop runs **last**, after segmentation and compositing, so both always see
 the whole frame. A subject who walks outside the crop still has to be findable,
 or the camera could never follow them back.

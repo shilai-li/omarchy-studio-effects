@@ -88,10 +88,12 @@ struct Args {
           action = clap::ArgAction::Set)]
     framing: bool,
 
-    /// Furthest the framing may crop in, 1.0 to 3.0. The crop is scaled back to
-    /// the output size, so past this the picture is visibly soft.
-    #[arg(long, default_value_t = 1.6)]
-    framing_zoom: f32,
+    /// Furthest the framing may crop in, as a percentage: 200 is 2x. The crop
+    /// is scaled back to the output size, so past this the picture goes soft --
+    /// but someone sitting far from the camera needs the room, which is why the
+    /// default is not tighter.
+    #[arg(long, default_value_t = 200)]
+    framing_zoom: u32,
 
     /// How far the subject may drift before the camera moves at all, as a
     /// fraction of the crop. Zero makes the frame chase every twitch.
@@ -320,6 +322,7 @@ fn main() -> Result<()> {
         dim: args.dim.min(100),
         desat: args.desat.min(100),
         framing: args.framing,
+        zoom: args.framing_zoom.clamp(100, 300),
         resume: if args.effect == Effect::None {
             Effect::Blur
         } else {
@@ -354,7 +357,7 @@ fn main() -> Result<()> {
     let mut framer = framing::Framing::new(
         args.width,
         args.height,
-        args.framing_zoom,
+        args.framing_zoom as f32 / 100.0,
         args.framing_dead_zone,
         args.framing_smoothing,
     );
@@ -400,9 +403,9 @@ fn main() -> Result<()> {
         // Read once per frame: the socket thread may change these at any point,
         // and a frame that blurred with one radius and blended with another
         // would tear.
-        let (effect, blur_radius, passes, dim, desat, want_framing, want_preview) = {
+        let (effect, blur_radius, passes, dim, desat, want_framing, zoom, want_preview) = {
             let s = settings.lock().expect("settings mutex poisoned");
-            (s.effect, s.blur, s.passes, s.dim, s.desat, s.framing, s.preview)
+            (s.effect, s.blur, s.passes, s.dim, s.desat, s.framing, s.zoom, s.preview)
         };
 
         let t = Instant::now();
@@ -459,6 +462,7 @@ fn main() -> Result<()> {
         // camera could never follow them back.
         let t = Instant::now();
         if want_framing {
+            framer.set_max_zoom(zoom as f32 / 100.0);
             let rect = framer.update(&mask);
             if let Some(r) = rect {
                 let dst_ref = dst.get_mut().context("output buffer was not writable")?;

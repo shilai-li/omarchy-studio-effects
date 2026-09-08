@@ -113,6 +113,7 @@ Below the effects are the settings that apply to whichever one is on:
 | | |
 |---|---|
 | **Auto framing** | tracks you and keeps you centred |
+| **Zoom in** | how close it may crop, 100–300%. Raise it if you sit far back |
 | **Blur** | radius, 0-200 |
 | **Smoothness** | blur repeats, 1-3. One streaks against hard edges; two looks Gaussian |
 | **Darken** | dim the background, 0-100, so you stand out |

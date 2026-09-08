@@ -31,6 +31,7 @@ Environment=PASSES=2
 Environment=DIM=0
 Environment=DESAT=0
 Environment=FRAMING=off
+Environment=FRAMING_ZOOM=200
 Environment=EFFECT=blur
 Environment=BACKGROUND=
 Environment=MASK_GAIN=3.0
@@ -49,6 +50,7 @@ ExecStart=/usr/bin/studio-effects-daemon \
     --dim ${DIM} \
     --desat ${DESAT} \
     --framing=${FRAMING} \
+    --framing-zoom ${FRAMING_ZOOM} \
     --effect ${EFFECT} \
     --background ${BACKGROUND} \
     --mask-gain ${MASK_GAIN} \
