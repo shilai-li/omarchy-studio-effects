@@ -1,0 +1,80 @@
+#!/usr/bin/env bash
+#
+# Makes Voice Focus the default microphone while it is running, and puts the
+# previous one back when it stops.
+#
+#   studio-effects-voice-default claim
+#   studio-effects-voice-default release
+#
+# Applications that follow "default" -- which is most of them, and the only
+# option in some -- cannot otherwise benefit from the filter without being
+# reconfigured one by one.
+#
+# Restoring on the way out is not optional. The voice_focus node only exists
+# while the service runs, so leaving the default pointing at it after a stop
+# leaves every one of those applications pointing at a device that is gone.
+#
+# The default is set by node name rather than by the numeric id wpctl takes,
+# because ids are handed out afresh each time a node appears: an id saved on
+# start means nothing by the time it is used on stop.
+
+set -uo pipefail
+
+FILTER=voice_focus
+STATE="${XDG_RUNTIME_DIR:-/tmp}/studio-effects-voice-previous-source"
+DEADLINE=40   # quarter-seconds to wait for the node to appear
+
+# Off by default only if the user says so; the point of the feature is that it
+# happens without being asked for.
+case "${VOICE_SET_DEFAULT:-yes}" in
+    no|off|false|0) exit 0 ;;
+esac
+
+current_default() {
+    pw-metadata -n default 2>/dev/null \
+        | grep "key:'default.audio.source'" | tail -1 \
+        | sed -n "s/.*value:'{\"name\":\"\([^\"]*\)\"}'.*/\1/p"
+}
+
+set_default() {
+    pw-metadata -n default 0 default.configured.audio.source \
+        "{\"name\":\"$1\"}" Spa:String:JSON >/dev/null 2>&1
+}
+
+case "${1:-}" in
+claim)
+    previous=$(current_default)
+    # Guard against remembering ourselves: a restart would otherwise record
+    # voice_focus as the thing to go back to, and the real microphone would be
+    # forgotten for good.
+    if [ -n "$previous" ] && [ "$previous" != "$FILTER" ]; then
+        printf '%s\n' "$previous" > "$STATE"
+    fi
+
+    # systemd considers the unit started once pipewire is running, which is
+    # before the filter has published anything.
+    for _ in $(seq "$DEADLINE"); do
+        pw-link -o 2>/dev/null | grep -q "^${FILTER}:" && break
+        sleep 0.25
+    done
+    pw-link -o 2>/dev/null | grep -q "^${FILTER}:" || exit 0
+
+    set_default "$FILTER"
+    ;;
+
+release)
+    previous=$(cat "$STATE" 2>/dev/null)
+    rm -f "$STATE"
+    [ -n "$previous" ] || exit 0
+    # Only put it back if we are the one still holding it; a user who chose a
+    # different microphone in the meantime meant it.
+    [ "$(current_default)" = "$FILTER" ] || exit 0
+    set_default "$previous"
+    ;;
+
+*)
+    echo "usage: ${0##*/} claim|release" >&2
+    exit 2
+    ;;
+esac
+exit 0

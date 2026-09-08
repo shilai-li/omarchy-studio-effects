@@ -319,6 +319,27 @@ the filter would exist from login whether or not anyone wanted it. And
 when something records from Voice Focus -- otherwise leaving it on would hold
 the mic, which is the audio version of leaving the camera light on.
 
+**Voice Focus takes the default microphone, and must give it back.** Most
+applications offer only "default", so a filter nobody can select is a filter
+nobody uses. `voice-default claim` runs from `ExecStartPost` and `release` from
+`ExecStopPost`, and the release half is the important one: the `voice_focus`
+node exists only while the service does, so a default left pointing at it after
+a stop points every one of those applications at a device that is gone.
+
+The default is set **by node name**, through `pw-metadata`'s
+`default.configured.audio.source`, not by the numeric id `wpctl set-default`
+takes. Ids are handed out afresh whenever a node appears, so one saved at start
+means nothing by the time it is read at stop.
+
+Making it the default does **not** cause the filter to capture from itself,
+despite appearances. That was seen once and chased for a long time; the cause
+was several `pipewire -c` test instances running at once, each publishing its
+own `voice_focus`, so one instance's capture linked to another's output. With a
+single instance WirePlumber's `node.link-group` prevents the self-link, verified
+by restarting the service with `voice_focus` already default and watching the
+capture land on the hardware microphone. **Kill stray instances before
+concluding anything about routing.**
+
 **Ports existing does not mean the graph runs.** A filter-chain publishes its
 ports from the config before the graph is verified, so `pw-link` showed
 `voice_focus:capture_FL` and `capture_FR` for a graph that was refusing to start

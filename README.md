@@ -140,8 +140,13 @@ it.
 ## Voice Focus
 
 A denoised copy of your microphone, published as a second source called **Voice
-Focus**. Turn it on with `v` in the panel, or click its row, then pick it as
-your microphone.
+Focus**. Turn it on with `v` in the panel, or click its row.
+
+While it runs it becomes your default microphone, and the previous one is put
+back when it stops — so applications that only follow "default", which is most
+of them, get the filter without being reconfigured one by one. Set
+`VOICE_SET_DEFAULT=no` in `~/.config/studio-effects.conf` if you would rather
+choose it per application.
 
 It is a separate service from the camera, on purpose: denoising a call you are
 on with your camera off is a normal thing to want, and the two fail

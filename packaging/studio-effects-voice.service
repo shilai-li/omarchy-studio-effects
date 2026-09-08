@@ -16,7 +16,18 @@ BindsTo=pipewire.service
 
 [Service]
 Type=simple
+Environment=VOICE_SET_DEFAULT=yes
+EnvironmentFile=-%h/.config/studio-effects.conf
 ExecStart=/usr/bin/pipewire -c /usr/share/studio-effects/voice-focus.conf
+
+# Take over the default microphone while the filter runs, and hand it back on
+# the way out. Applications that follow "default" -- most of them, and the only
+# option in some -- cannot use the filter otherwise. Handing it back matters
+# more: the voice_focus node exists only while this service does, so a default
+# left pointing at it after a stop points every one of those applications at a
+# device that is gone.
+ExecStartPost=/usr/lib/studio-effects/voice-default claim
+ExecStopPost=/usr/lib/studio-effects/voice-default release
 Restart=on-failure
 RestartSec=2
 Slice=session.slice
