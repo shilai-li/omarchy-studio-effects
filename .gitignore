@@ -14,6 +14,11 @@ target/
 # OpenVINO's tflite frontend cannot translate. See AGENTS.md.
 /models/*.tflite
 
+# RobustVideoMatting's ONNX. Fetched by the PKGBUILD rather than committed: it
+# is 15 MB, and the IR built from it is another 8.
+/models/*.onnx.tmp
+/models/rvm.onnx
+
 *~
 .*.sw?
 node_modules/

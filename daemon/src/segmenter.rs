@@ -8,11 +8,28 @@ use crate::nv12::NET;
 /// Devices in the order we want them, best first.
 const PREFERENCE: [&str; 3] = ["NPU", "GPU", "CPU"];
 
+/// The recurrent tensors a matting model carries between frames.
+///
+/// RobustVideoMatting is not a per-frame classifier: it remembers what it saw,
+/// which is what makes its edges hold still instead of shimmering. That memory
+/// is four tensors handed back in on the next frame, and dropping them would
+/// leave a model that is merely slower than a per-frame one.
+struct Recurrent {
+    input: String,
+    output: String,
+    tensor: Tensor,
+}
+
 pub struct Segmenter {
     request: InferRequest,
     input: Tensor,
+    /// Which output carries the mask. Named, because a matting model also
+    /// returns a foreground image and its own next states.
+    mask_output: String,
+    states: Vec<Recurrent>,
     mask: Vec<f32>,
     pub device: String,
+    pub model: String,
 }
 
 /// Pick the best device present, saying out loud what was chosen and why.
@@ -77,20 +94,63 @@ impl Segmenter {
             .read_model_from_file(model_xml, &weights)
             .with_context(|| format!("reading model {model_xml}"))?;
 
+        // A matting model announces itself by its inputs: an image plus four
+        // recurrent states, rather than an image alone.
+        let inputs: Vec<String> = (0..model.get_inputs_len()?)
+            .filter_map(|i| model.get_input_by_index(i).ok())
+            .filter_map(|n| n.get_name().ok())
+            .collect();
+        let recurrent = inputs.iter().any(|n| n == "r1i");
+
         let mut compiled = core
             .compile_model(&model, device.parse().unwrap())
             .with_context(|| format!("compiling the model for {device}"))?;
-        let request = compiled.create_infer_request()?;
+        let mut request = compiled.create_infer_request()?;
 
         // Allocated once and refilled per frame; the model's shape is static
         // precisely so this never has to be rebuilt.
         let input = Tensor::new(ElementType::F32, &Shape::new(&[1, 3, NET as i64, NET as i64])?)?;
+        let image_input = if recurrent { "src" } else { inputs.first().map_or("", |s| s.as_str()) };
+        request.set_tensor(image_input, &input)?;
+
+        // The states start at zero, which is what "no previous frame" means to
+        // the model, and are then carried forward for the life of the daemon.
+        //
+        // Zeroing them is not a formality. `Tensor::new` hands back
+        // uninitialised memory, and whatever happens to be in it goes straight
+        // into a recurrence: one NaN in the first frame's state is fed back as
+        // the next frame's input forever, and the model returns NaN for the
+        // rest of the daemon's life. It looks exactly like a mask of zero --
+        // every frame blurred, subject included -- with nothing logged.
+        let mut states = Vec::new();
+        if recurrent {
+            for (name, shape) in [
+                ("r1", [1, 16, 64, 64]),
+                ("r2", [1, 20, 32, 32]),
+                ("r3", [1, 40, 16, 16]),
+                ("r4", [1, 64, 8, 8]),
+            ] {
+                let dims: Vec<i64> = shape.iter().map(|&d| d as i64).collect();
+                let mut tensor = Tensor::new(ElementType::F32, &Shape::new(&dims)?)?;
+                tensor.get_data_mut::<f32>()?.fill(0.0);
+                let input = format!("{name}i");
+                request.set_tensor(&input, &tensor)?;
+                states.push(Recurrent {
+                    input,
+                    output: format!("{name}o"),
+                    tensor,
+                });
+            }
+        }
 
         Ok(Self {
             request,
             input,
+            mask_output: if recurrent { "pha".into() } else { String::new() },
+            states,
             mask: vec![0.0; NET * NET],
             device,
+            model: if recurrent { "matting".into() } else { "segmentation".into() },
         })
     }
 
@@ -107,10 +167,24 @@ impl Segmenter {
     /// an `unsafe` that outlives the next infer(). A 256 KB memcpy costs far
     /// less than the composite that follows it.
     pub fn infer(&mut self) -> Result<&[f32]> {
-        self.request.set_input_tensor(&self.input)?;
         self.request.infer()?;
-        let out = self.request.get_output_tensor()?;
+
+        let out = if self.mask_output.is_empty() {
+            self.request.get_output_tensor()?
+        } else {
+            self.request.get_tensor(&self.mask_output)?
+        };
         self.mask.copy_from_slice(out.get_data::<f32>()?);
+
+        // Carry the model's memory into the next frame. Copied rather than
+        // swapped because the request holds these tensors: handing it a
+        // different one each frame would mean re-binding every input.
+        for state in &mut self.states {
+            let produced = self.request.get_tensor(&state.output)?;
+            let source: &[f32] = produced.get_data::<f32>()?;
+            state.tensor.get_data_mut::<f32>()?.copy_from_slice(source);
+            self.request.set_tensor(&state.input, &state.tensor)?;
+        }
         Ok(&self.mask)
     }
 }

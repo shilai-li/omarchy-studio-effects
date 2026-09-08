@@ -20,6 +20,17 @@ HEIGHT=720
 CAPTURE_WIDTH=0
 CAPTURE_HEIGHT=0
 
+# Which model finds you in the frame.
+#
+#   segmentation  MediaPipe selfie segmentation. 0.8 ms, a hard-edged mask.
+#   matting       RobustVideoMatting. 3.4 ms, a true alpha matte with recurrent
+#                 state, so hair looks like hair and edges hold still between
+#                 frames instead of shimmering.
+#
+# Both run on the NPU. Matting costs about 4 ms more of a 33 ms frame, which is
+# what the NPU's spare capacity is for.
+MODEL=segmentation
+
 # Background blur radius, in pixels at the frame's own scale. Adjustable while
 # running from the bar panel, or `studio-effects blur 40`.
 BLUR=12

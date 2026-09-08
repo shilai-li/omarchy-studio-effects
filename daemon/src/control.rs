@@ -70,6 +70,9 @@ pub struct Settings {
 /// Facts the socket reports but cannot change.
 pub struct Fixed {
     pub device: String,
+    /// Which model is loaded. Reported so the two can be told apart while
+    /// comparing them on the same camera.
+    pub model: String,
     pub input: String,
     pub output: String,
     pub width: u32,
@@ -92,7 +95,7 @@ fn escape(text: &str) -> String {
 
 fn json(settings: &Settings, fixed: &Fixed, error: Option<&str>) -> String {
     let mut out = format!(
-        r#"{{"effect":"{}","blur":{},"passes":{},"dim":{},"desat":{},"framing":{},"zoom":{},"device":"{}","input":"{}","output":"{}","width":{},"height":{},"background":{},"preview":{},"previewPath":"{}""#,
+        r#"{{"effect":"{}","blur":{},"passes":{},"dim":{},"desat":{},"framing":{},"zoom":{},"device":"{}","model":"{}","input":"{}","output":"{}","width":{},"height":{},"background":{},"preview":{},"previewPath":"{}""#,
         settings.effect.as_str(),
         settings.blur,
         settings.passes,
@@ -101,6 +104,7 @@ fn json(settings: &Settings, fixed: &Fixed, error: Option<&str>) -> String {
         settings.framing,
         settings.zoom,
         fixed.device,
+        escape(&fixed.model),
         fixed.input,
         fixed.output,
         fixed.width,
@@ -235,6 +239,7 @@ mod tests {
     fn fixed() -> Fixed {
         Fixed {
             device: "NPU".into(),
+            model: "segmentation".into(),
             input: "/dev/video0".into(),
             output: "/dev/video10".into(),
             width: 1280,

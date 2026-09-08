@@ -28,6 +28,7 @@ Environment=WIDTH=1280
 Environment=HEIGHT=720
 Environment=CAPTURE_WIDTH=0
 Environment=CAPTURE_HEIGHT=0
+Environment=MODEL=segmentation
 Environment=BLUR=12
 Environment=PASSES=2
 Environment=DIM=0
@@ -59,7 +60,7 @@ ExecStart=/usr/bin/studio-effects-daemon \
     --background ${BACKGROUND} \
     --mask-gain ${MASK_GAIN} \
     --mask-smoothing ${MASK_SMOOTHING} \
-    --model /usr/share/studio-effects/models/selfie_segmentation.xml \
+    --model ${MODEL} \
     --cache %C/studio-effects \
     --stats-every 0
 

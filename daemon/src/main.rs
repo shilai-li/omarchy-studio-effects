@@ -131,7 +131,12 @@ struct Args {
     #[arg(long, default_value_t = 0.5)]
     mask_smoothing: f32,
 
-    #[arg(long, default_value = "models/selfie_segmentation.xml")]
+    /// Which model to segment with: `segmentation`, `matting`, or a path.
+    ///
+    /// segmentation  MediaPipe selfie segmentation. 0.8 ms, a hard-edged mask.
+    /// matting       RobustVideoMatting. 3.4 ms, a true alpha matte with
+    ///               recurrent state, so edges hold still between frames.
+    #[arg(long, default_value = "segmentation")]
     model: String,
 
     #[arg(long, default_value = "/tmp/studio-effects-cache")]
@@ -152,6 +157,22 @@ struct Args {
 /// Accepts the words a config file and a socket command already use, so the
 /// same setting is not spelled three different ways depending on where it is
 /// written.
+/// A bare name means one of the models we ship; anything with a separator is a
+/// path. Installed models win over the checkout's, so a running service is not
+/// quietly using whatever happens to be in a working tree.
+fn resolve_model(name: &str) -> String {
+    if name.contains('/') || name.ends_with(".xml") {
+        return name.to_string();
+    }
+    for dir in ["/usr/share/studio-effects/models", "models"] {
+        let candidate = format!("{dir}/{name}.xml");
+        if std::path::Path::new(&candidate).exists() {
+            return candidate;
+        }
+    }
+    format!("models/{name}.xml")
+}
+
 fn parse_switch(s: &str) -> Result<bool, String> {
     match s.trim().to_ascii_lowercase().as_str() {
         "on" | "true" | "yes" | "1" => Ok(true),
@@ -247,8 +268,9 @@ fn main() -> Result<()> {
     let input = device::resolve(&args.input)?;
     let output = args.output.as_deref().map(device::resolve).transpose()?;
 
-    let mut seg = segmenter::Segmenter::new(&args.model, &args.cache, args.device.as_deref())?;
-    println!("segmenting on {}", seg.device);
+    let model_path = resolve_model(&args.model);
+    let mut seg = segmenter::Segmenter::new(&model_path, &args.cache, args.device.as_deref())?;
+    println!("segmenting on {} with the {} model", seg.device, seg.model);
 
     // decodebin because a USB camera hands over MJPEG while a loopback hands
     // over raw NV12, and the daemon should not care which.
@@ -377,6 +399,7 @@ fn main() -> Result<()> {
         Arc::clone(&settings),
         Fixed {
             device: seg.device.clone(),
+            model: seg.model.clone(),
             input: input.clone(),
             output: output.clone().unwrap_or_else(|| "(none)".into()),
             width: args.width,

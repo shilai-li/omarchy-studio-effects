@@ -214,6 +214,18 @@ A Hyprland bind:
 bindd = SUPER CTRL, B, Toggle camera effects, exec, studio-effects toggle
 ```
 
+## Two models
+
+```conf
+MODEL=segmentation   # MediaPipe, 0.8 ms, a hard-edged mask
+MODEL=matting        # RobustVideoMatting, 3.4 ms, a true alpha matte
+```
+
+Both run on the NPU. Matting gives soft, natural hair edges and holds them still
+between frames, because it carries state from one frame to the next rather than
+deciding each one afresh. It costs about 4 ms more of a 33 ms budget — which is
+what the NPU's spare capacity is for, since it otherwise sits under 1% busy.
+
 ## Requirements
 
 An Intel Core Ultra with an NPU, though it falls back to the GPU and then the

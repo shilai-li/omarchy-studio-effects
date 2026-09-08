@@ -229,6 +229,28 @@ on a bigger model until the composite is off the CPU.
 
 ## Invariants
 
+**Two models, and the NPU's spare capacity is what pays for the second.**
+`segmentation` is MediaPipe selfie segmentation at 0.8 ms; `matting` is
+RobustVideoMatting at 3.4 ms, a true alpha matte with recurrent state, so hair
+reads as hair and edges hold still instead of shimmering. Both output
+`[1,1,256,256]`, which is why the second is a drop-in: the upscaler, the subject
+box and the blend are untouched.
+
+Getting RVM onto the NPU needed two things, and both failures looked like the
+model being unsuitable rather than the export being wrong. Its
+`downsample_ratio` is a runtime input, so the sizes inside its encoder depend on
+a value the compiler cannot see and the NPU refuses the whole model, reporting a
+dimension of -9223372036854775808 -- OpenVINO's marker for "dynamic".
+`tools/convert.py` freezes it. Its recurrent states have no declared size, so
+they are discovered by one CPU run and pinned.
+
+**Zero the recurrent state tensors.** `Tensor::new` returns uninitialised
+memory, and in a recurrent model whatever is in it is fed back as the next
+frame's input forever: one NaN on the first frame and the model returns NaN for
+the life of the daemon. It presents as a mask of zero -- every frame blurred,
+subject included -- with nothing logged and no error. The comment claiming the
+states start at zero was there before the code that made it true.
+
 **Static shapes, cached blobs.** The NPU plugin compiles only static shapes, and
 a first compile costs seconds (a second on the GPU already). `tools/convert.py`
 pins the batch at conversion time rather than reshaping at load, and the daemon
