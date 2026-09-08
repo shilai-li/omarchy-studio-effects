@@ -292,11 +292,18 @@ function notRunningState() {
     return state;
 }
 
+// One glyph for the whole plugin, whatever it happens to be doing. It started
+// as a camera icon, which stopped being honest once the same widget also
+// switched a microphone filter: half of what it controls is not a camera.
+// Sparkles say "effects" without claiming which device.
+//
+// State is not carried by the glyph. The bar already dims an inactive widget
+// and accents an active one, and the tooltip says which effects are on -- a
+// second encoding in the glyph would only disagree with those eventually.
+var GLYPH = "\u{F0674}";
+
 function glyphFor(state) {
-    if (!state || !state.running) return "\u{F0568}";   // video-off
-    if (state.effect === "replace") return "\u{F02E9}"; // image
-    if (state.effect === "blur") return "\u{F0567}";    // video
-    return "\u{F0568}";
+    return GLYPH;
 }
 
 // The power row's label. Separate from labelFor because "off" here means the
@@ -318,10 +325,20 @@ function labelFor(state) {
     return "Effects off";
 }
 
-function tooltipFor(state) {
-    if (!state || !state.running) return "Studio Effects — daemon not running";
-    var where = state.device ? " on " + state.device : "";
-    return "Studio Effects — " + labelFor(state).toLowerCase() + where;
+// The tooltip carries what the glyph no longer does, and it has to cover both
+// halves: with a single icon, a user whose camera is off but whose microphone
+// filter is on has no other way to tell why the widget looks active.
+function tooltipFor(state, voice) {
+    var parts = [];
+    if (state && state.running) {
+        var where = state.device ? " on " + state.device : "";
+        parts.push(labelFor(state).toLowerCase() + where);
+    } else {
+        parts.push("camera effects off");
+    }
+    if (voice === "on") parts.push("voice focus on");
+    else if (voice === "off") parts.push("voice focus off");
+    return "Studio Effects — " + parts.join(", ");
 }
 
 // `replace` is offered only when the daemon actually loaded an image. Showing
@@ -384,6 +401,7 @@ if (typeof module !== "undefined" && module.exports) {
         unknownState: unknownState,
         parseStatus: parseStatus,
         notRunningState: notRunningState,
+        GLYPH: GLYPH,
         glyphFor: glyphFor,
         labelFor: labelFor,
         tooltipFor: tooltipFor,

@@ -272,16 +272,27 @@ check("framing state is read back from the daemon", () => {
 
 // ---- What the bar shows.
 
-check("the glyph distinguishes off, blurred and replaced", () => {
-  const g = e => M.glyphFor({ running: true, effect: e })
-  ok(g("blur") !== g("replace"), "blur and replace should differ")
-  ok(g("none") !== g("blur"), "off and blurred should differ")
-  eq(M.glyphFor(M.notRunningState()), g("none"), "a stopped daemon reads as off")
+check("one glyph covers the whole plugin, camera and microphone alike", () => {
+  // A camera icon described half of what this widget controls once it also
+  // switched the microphone filter.
+  const seen = new Set(["blur", "replace", "none"].map(e => M.glyphFor({ running: true, effect: e })))
+  seen.add(M.glyphFor(M.notRunningState()))
+  eq(seen.size, 1, "the glyph must not change with state")
+  eq([...seen][0], M.GLYPH)
 })
 
-check("a stopped daemon says so rather than claiming effects are off", () => {
-  ok(M.tooltipFor(M.notRunningState()).indexOf("not running") !== -1)
-  ok(M.labelFor(M.parseStatus(REPLY)).indexOf("blur") !== -1)
+check("the tooltip carries the state the glyph no longer does", () => {
+  // Both halves, because one icon cannot say which of them is on.
+  const on = M.tooltipFor(M.parseStatus(REPLY), "on")
+  ok(on.indexOf("blur") !== -1, "should name the camera effect: " + on)
+  ok(on.indexOf("voice focus on") !== -1, "should name voice focus: " + on)
+
+  const camOff = M.tooltipFor(M.notRunningState(), "on")
+  ok(camOff.indexOf("camera effects off") !== -1, camOff)
+  ok(camOff.indexOf("voice focus on") !== -1, "a filter running with the camera off must show: " + camOff)
+
+  // A missing voice unit is not mentioned at all rather than called "off".
+  ok(M.tooltipFor(M.parseStatus(REPLY), "missing").indexOf("voice focus") === -1)
 })
 
 // ---- Choices offered.

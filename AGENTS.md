@@ -413,6 +413,18 @@ at its minimum while the daemon plainly uses something else. It showed up as
 Smoothness reading 1 against a daemon reporting 2. A test now walks `PARAMS`
 against a parsed reply so that fails instead.
 
+**One glyph, and state lives in the tooltip.** The bar icon started as a camera
+and stopped being honest once the same widget also switched a microphone
+filter -- half of what it controls is not a camera. It is sparkles now, which
+say "effects" without claiming a device.
+
+The glyph deliberately does not change with state. The bar already dims an
+inactive widget and accents an active one, so a second encoding in the glyph is
+a third source of truth that will eventually disagree with the other two. What
+the glyph can no longer say, the tooltip does, and it has to name both halves:
+with one icon, someone whose camera is off and whose microphone filter is on has
+no other way to tell why the widget looks active.
+
 **The widget owns no settings, and that is the point.** The daemon holds the
 effect and the blur radius and answers every command with its whole state, so
 there is one copy of the truth and the widget only ever shows it.

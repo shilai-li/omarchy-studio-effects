@@ -410,10 +410,13 @@ BarWidget {
     anchors.fill: parent
     bar: root.bar
     text: root.glyph
-    active: root.opened || root.effectsOn
+    // Active if anything the widget controls is on. With one glyph for both
+    // halves, a microphone filter running while the camera is off still has to
+    // look like something is happening.
+    active: root.opened || root.effectsOn || root.voice === "on"
     horizontalMargin: 8.75
     verticalPadding: 8.75
-    tooltipText: Model.tooltipFor(root.state)
+    tooltipText: Model.tooltipFor(root.state, root.voice)
 
     onPressed: function(b) { root.togglePanel() }
   }
