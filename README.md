@@ -102,7 +102,7 @@ frame for the widget instead.
 | `↑` `↓` (or `k` `j`) | move |
 | `enter` / `space` | choose that effect |
 | `←` `→` (or `h` `l`) | adjust the selected setting |
-| `p` | camera effects on or off |
+| `c` | camera effects on or off |
 | `v` | voice focus on or off |
 | `f` | turn effects off, or back on |
 | `r` | re-read the daemon |

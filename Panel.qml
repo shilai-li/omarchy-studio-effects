@@ -147,12 +147,12 @@ Panel {
     var key = String(text).toLowerCase()
     if (key === "r" && root.host) root.host.refresh()
     else if (key === "f" && root.host) root.host.toggle()
-    else if (key === "p") root.togglePower()
+    else if (key === "c") root.togglePower()
     else if (key === "v") root.toggleVoice()
   }
 
   // The preview is asked for on open, but a daemon can arrive long after that:
-  // pressing `p` stops and restarts it underneath a panel that stays open the
+  // pressing `c` stops and restarts it underneath a panel that stays open the
   // whole time, so open() never runs again and nothing would re-request the
   // frames. Watch the daemon coming back instead of the panel opening.
   onRunningChanged: {
@@ -630,12 +630,12 @@ Panel {
         Text {
           width: parent.width
           textFormat: Text.PlainText
-          text: !root.running ? "p camera   v voice   esc close"
+          text: !root.running ? "c camera   v voice   esc close"
               : root.currentRow && root.currentRow.kind === "param"
-              ? "↑↓ move   ←→ adjust   p off   v voice   esc close"
+              ? "↑↓ move   ←→ adjust   c off   v voice   esc close"
               : root.currentRow && root.currentRow.kind === "toggle"
-              ? "↑↓ move   enter switch   p off   v voice   esc close"
-              : "↑↓ move   enter choose   p off   v voice   esc close"
+              ? "↑↓ move   enter switch   c off   v voice   esc close"
+              : "↑↓ move   enter choose   c off   v voice   esc close"
           color: root.dim
           font.family: root.contentFontFamily
           font.pixelSize: Style.font.caption
