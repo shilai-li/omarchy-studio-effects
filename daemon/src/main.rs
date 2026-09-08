@@ -9,7 +9,7 @@
 use anyhow::{Context, Result};
 use std::sync::{Arc, Mutex};
 use studio_effects_daemon::control::{self, Effect, Fixed, Settings};
-use studio_effects_daemon::{background, device, framing, mask, nv12, preview, segmenter};
+use studio_effects_daemon::{background, device, framing, mask, nv12, preview, segmenter, state};
 use clap::Parser;
 use gstreamer as gst;
 use gstreamer::prelude::*;
@@ -378,7 +378,7 @@ fn main() -> Result<()> {
         None => None,
     };
 
-    let settings = Arc::new(Mutex::new(Settings {
+    let mut initial = Settings {
         effect: args.effect,
         blur: args.blur,
         passes: args.passes.clamp(1, 3),
@@ -393,7 +393,13 @@ fn main() -> Result<()> {
         },
         has_background: backdrop.is_some(),
         preview: false,
-    }));
+    };
+
+    // What the panel last set wins over what the config starts with. Turning
+    // the camera off stops this process, so without this every live change is
+    // undone by the switch that is meant only to pause the camera.
+    state::restore(&mut initial);
+    let settings = Arc::new(Mutex::new(initial));
 
     match control::serve(
         Arc::clone(&settings),

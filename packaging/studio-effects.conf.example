@@ -1,6 +1,12 @@
 # Copy to ~/.config/studio-effects.conf and edit, then:
 #   systemctl --user restart studio-effects
 #
+# This file is where the daemon starts from. Anything you then change from the
+# bar panel -- the effect, blur, framing, zoom -- is remembered in
+#   ~/.local/state/studio-effects/settings.json
+# and wins over the values here, so switching the camera off and on keeps what
+# you last chose rather than undoing it. Delete that file to go back to these.
+#
 # INPUT takes either a /dev/video path or a card label. Prefer the label:
 # numbers move between boots. `studio-effects-daemon --list-devices` prints both.
 INPUT=/dev/video0

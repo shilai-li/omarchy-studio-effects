@@ -28,6 +28,16 @@ pub enum Effect {
 }
 
 impl Effect {
+    /// Parse the words the socket and the saved state both use.
+    pub fn parse(text: &str) -> Option<Effect> {
+        match text.trim().to_ascii_lowercase().as_str() {
+            "none" | "off" => Some(Effect::None),
+            "blur" => Some(Effect::Blur),
+            "replace" => Some(Effect::Replace),
+            _ => None,
+        }
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             Effect::None => "none",
@@ -121,6 +131,13 @@ fn json(settings: &Settings, fixed: &Fixed, error: Option<&str>) -> String {
 }
 
 fn handle(line: &str, settings: &Mutex<Settings>, fixed: &Fixed) -> String {
+    // Whether this command could have changed something worth remembering.
+    // `status` and `preview` are excluded: one changes nothing, and the other
+    // tracks a panel being open, which is not a preference.
+    let persists = !matches!(
+        line.split_whitespace().next().unwrap_or("status"),
+        "status" | "preview" | ""
+    );
     let mut words = line.split_whitespace();
     let verb = words.next().unwrap_or("status");
     let arg = words.next();
@@ -180,6 +197,13 @@ fn handle(line: &str, settings: &Mutex<Settings>, fixed: &Fixed) -> String {
             _ => error = Some("usage: desat <0-100>"),
         },
         _ => error = Some("unknown command; try status, effect, toggle, preview, framing, zoom, blur, passes, dim or desat"),
+    }
+
+    // Saved on the way out of every change, not on shutdown: systemd stops the
+    // daemon with a signal, and anything written only at exit is the thing that
+    // never runs.
+    if persists && error.is_none() {
+        crate::state::save(&s);
     }
 
     json(&s, fixed, error)

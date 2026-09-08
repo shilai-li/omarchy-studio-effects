@@ -500,6 +500,24 @@ moment the CLI, a keybinding or another monitor changes anything. The usual rule
 about mirroring a setting in three places does not apply to state that belongs
 to something else.
 
+**The camera switch stops the process, so live settings have to be written
+down.** Turning the camera off is not a pause: it stops the daemon, and every
+setting the panel changed lived only in that process. Coming back from the
+config file meant the switch quietly undid the last several things the user had
+done. `state.rs` saves the panel-changeable settings to
+`~/.local/state/studio-effects/settings.json` on every change and applies them
+over the config at startup.
+
+On change, not on exit -- systemd stops the daemon with a signal, and anything
+written only on the way out is the thing that never runs. Written to a temporary
+name and renamed, so a daemon killed mid-write leaves the previous choices
+rather than half of the new ones. And a remembered `replace` is refused when no
+image is configured, exactly as the socket refuses it: restoring a state the
+socket would not have allowed is how the camera comes back showing nothing.
+
+Only what the panel can change is saved. Resolution, model and camera stay with
+the config, because remembering those would make editing that file look broken.
+
 **Settings change over a socket, never by restarting.** Restarting the service
 to change an effect drops the camera for a second, which on a live call is a
 black frame everyone sees. `control.rs` listens on a unix socket in

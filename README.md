@@ -208,6 +208,11 @@ studio-effects blur 40
 Every command answers with the daemon's full state, so a caller never has to ask
 twice, and a refused change is an error in the JSON *and* a non-zero exit.
 
+What you change is remembered. Switching the camera off stops the daemon, so
+your choices are written to `~/.local/state/studio-effects/settings.json` and
+applied again when it comes back — the switch pauses the camera without undoing
+your settings. Delete that file to return to the config's values.
+
 A Hyprland bind:
 
 ```
