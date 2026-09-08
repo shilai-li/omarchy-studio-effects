@@ -222,6 +222,8 @@ function unknownState(reason) {
         input: "",
         output: "",
         background: false,
+        width: 0,
+        height: 0,
         passes: 1,
         dim: 0,
         desat: 0,
@@ -269,6 +271,10 @@ function parseStatus(text) {
         // nothing, which is worse than not offering it.
         supports: supportedParams(parsed),
         device: typeof parsed.device === "string" ? parsed.device : "",
+        // Reported by the daemon and shown in the panel's footer, which is the
+        // only place the resolution appears at all.
+        width: typeof parsed.width === "number" ? parsed.width : 0,
+        height: typeof parsed.height === "number" ? parsed.height : 0,
         input: typeof parsed.input === "string" ? parsed.input : "",
         output: typeof parsed.output === "string" ? parsed.output : "",
         background: parsed.background === true,

@@ -183,6 +183,11 @@ Panel {
     readonly property var spec: row.isParam ? Model.paramFor(row.paramKey) : null
     readonly property bool isCurrent: !row.isParam && root.running && root.state.effect === effect
 
+    // First row of a new kind. Drawn inside the row rather than between rows so
+    // grouping costs no height in a panel that is already tall.
+    readonly property bool startsGroup: index > 0
+      && root.rows[index - 1] && root.rows[index - 1].kind !== modelData.kind
+
     width: parent ? parent.width : 0
     height: root.rowHeight
     hasCursor: root.cursorActive && root.selectedIndex === index
@@ -190,6 +195,18 @@ Panel {
     accent: Color.accent
     fill: root.hoverFill
     currentFill: root.selectedFill
+
+    Rectangle {
+      anchors.left: parent.left
+      anchors.right: parent.right
+      anchors.top: parent.top
+      anchors.leftMargin: Style.space(8)
+      anchors.rightMargin: Style.space(8)
+      height: 1
+      visible: row.startsGroup
+      color: root.contentForeground
+      opacity: 0.12
+    }
 
     MouseArea {
       anchors.fill: parent
@@ -231,7 +248,7 @@ Panel {
       textFormat: Text.PlainText
       text: row.isParam ? (row.spec ? row.spec.label : row.paramKey)
           : row.isToggle ? (row.toggleSpec ? row.toggleSpec.label : row.paramKey)
-          : row.effect === "none" ? "Off"
+          : row.effect === "none" ? "No effect"
           : row.effect === "blur" ? "Blur background"
           : "Replace background"
       color: root.contentForeground
@@ -335,7 +352,11 @@ Panel {
             anchors.leftMargin: Style.space(8)
             anchors.verticalCenter: parent.verticalCenter
             textFormat: Text.PlainText
-            text: "Studio Effects"
+            // "Camera", not "Studio Effects": that is the panel's name, and
+            // repeating it here cost a row and left two unrelated "Off"s on
+            // screen at once -- this switch releasing the camera, and the
+            // background effect being none.
+            text: "Camera"
             color: root.contentForeground
             font.family: root.contentFontFamily
             font.pixelSize: Style.font.body
@@ -595,7 +616,9 @@ Panel {
           width: parent.width
           visible: root.running
           textFormat: Text.PlainText
-          text: "blur " + root.state.blur + "   ·   " + root.state.device
+          // Not the blur radius: that has its own row two lines up. This is
+          // the part nothing else says.
+          text: root.state.device + "   ·   " + root.state.width + "x" + root.state.height
           color: root.dim
           font.family: root.contentFontFamily
           font.pixelSize: Style.font.caption

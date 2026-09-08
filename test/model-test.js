@@ -208,6 +208,16 @@ check("a stopped daemon offers no settings at all", () => {
   eq(M.panelRows(M.notRunningState()).filter(r => r.kind === "param").length, 0)
 })
 
+check("the resolution reaches the panel, which is the only place it shows", () => {
+  const s = M.parseStatus(REPLY)
+  eq(s.width, 1280, "width")
+  eq(s.height, 720, "height")
+  // A reply without them must not put "undefined" on screen.
+  const bare = M.parseStatus('{"effect":"blur"}')
+  eq(bare.width, 0, "width")
+  eq(M.notRunningState().height, 0, "height when stopped")
+})
+
 check("the daemon's values are read back, not defaulted", () => {
   const s = M.parseStatus('{"effect":"blur","blur":30,"passes":3,"dim":45,"desat":80}')
   eq(M.paramValue(s, "blur"), 30, "blur")
