@@ -130,6 +130,10 @@ BarWidget {
   function setBlur(radius) { root.send(Model.blurCommand(radius)) }
   function setParam(key, value) { root.send(Model.paramCommand(key, value)) }
   function setToggle(key, on) { root.send(Model.toggleCommand(key, on)) }
+  // Loading a model takes about 15 ms from the warm compile cache, and the
+  // frame loop keeps running on the old one until the new one is ready, so
+  // this needs no more ceremony than setting a blur radius.
+  function setChoice(key, value) { root.send(Model.choiceCommand(key, value)) }
 
   // ---- Voice focus. Its own process, its own state: nothing here goes through
   //      the camera daemon's socket, so it works with the camera off.

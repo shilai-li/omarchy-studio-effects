@@ -173,6 +173,34 @@ fn resolve_model(name: &str) -> String {
     format!("models/{name}.xml")
 }
 
+/// Every model that could be loaded, by bare name, nearest first.
+///
+/// Discovered rather than listed, so installing a third model makes it appear
+/// in the panel without the widget or the daemon knowing its name.
+fn installed_models() -> Vec<String> {
+    // The first directory holding any model wins outright, rather than the two
+    // being merged. resolve_model already prefers an installed model over a
+    // checkout's, and a union would additionally offer whatever a working tree
+    // happens to contain -- half-converted files, or the same model under both
+    // its upstream name and ours.
+    for dir in ["/usr/share/studio-effects/models", "models"] {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            continue;
+        };
+        let mut found: Vec<String> = entries
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|e| e == "xml"))
+            .filter_map(|p| p.file_stem()?.to_str().map(str::to_string))
+            .collect();
+        if !found.is_empty() {
+            found.sort();
+            return found;
+        }
+    }
+    Vec::new()
+}
+
 fn parse_switch(s: &str) -> Result<bool, String> {
     match s.trim().to_ascii_lowercase().as_str() {
         "on" | "true" | "yes" | "1" => Ok(true),
@@ -268,8 +296,9 @@ fn main() -> Result<()> {
     let input = device::resolve(&args.input)?;
     let output = args.output.as_deref().map(device::resolve).transpose()?;
 
-    let model_path = resolve_model(&args.model);
-    let mut seg = segmenter::Segmenter::new(&model_path, &args.cache, args.device.as_deref())?;
+    let models = installed_models();
+    let mut loaded = args.model.trim_end_matches(".xml").rsplit('/').next().unwrap_or("segmentation").to_string();
+    let mut seg = segmenter::Segmenter::new(&resolve_model(&loaded), &args.cache, args.device.as_deref())?;
     println!("segmenting on {} with the {} model", seg.device, seg.model);
 
     // decodebin because a USB camera hands over MJPEG while a loopback hands
@@ -393,19 +422,40 @@ fn main() -> Result<()> {
         },
         has_background: backdrop.is_some(),
         preview: false,
+        model: loaded.clone(),
     };
 
     // What the panel last set wins over what the config starts with. Turning
     // the camera off stops this process, so without this every live change is
     // undone by the switch that is meant only to pause the camera.
     state::restore(&mut initial);
+
+    // A remembered model that is no longer installed -- uninstalled, renamed,
+    // or saved on another machine -- falls back to what the config asked for
+    // rather than failing to start.
+    if !models.iter().any(|m| *m == initial.model) {
+        initial.model = loaded.clone();
+    }
+    if initial.model != loaded {
+        match segmenter::Segmenter::new(&resolve_model(&initial.model), &args.cache, args.device.as_deref()) {
+            Ok(other) => {
+                println!("restoring the {} model chosen last time", initial.model);
+                seg = other;
+                loaded = initial.model.clone();
+            }
+            Err(e) => {
+                eprintln!("cannot load the remembered {} model: {e:#}", initial.model);
+                initial.model = loaded.clone();
+            }
+        }
+    }
     let settings = Arc::new(Mutex::new(initial));
 
     match control::serve(
         Arc::clone(&settings),
         Fixed {
             device: seg.device.clone(),
-            model: seg.model.clone(),
+            models: models.clone(),
             input: input.clone(),
             output: output.clone().unwrap_or_else(|| "(none)".into()),
             width: args.width,
@@ -470,10 +520,32 @@ fn main() -> Result<()> {
         // Read once per frame: the socket thread may change these at any point,
         // and a frame that blurred with one radius and blended with another
         // would tear.
-        let (effect, blur_radius, passes, dim, desat, want_framing, zoom, want_preview) = {
+        let (effect, blur_radius, passes, dim, desat, want_framing, zoom, want_preview, wanted_model) = {
             let s = settings.lock().expect("settings mutex poisoned");
-            (s.effect, s.blur, s.passes, s.dim, s.desat, s.framing, s.zoom, s.preview)
+            (s.effect, s.blur, s.passes, s.dim, s.desat, s.framing, s.zoom, s.preview, s.model.clone())
         };
+
+        // Swapping the model costs one frame: the compile is cached, so it is
+        // milliseconds, and a recurrent model starts from zeroed state as it
+        // would on any other first frame. Done here rather than on the socket
+        // thread because the segmenter belongs to this loop and nothing else
+        // may touch it mid-inference.
+        if wanted_model != loaded {
+            match segmenter::Segmenter::new(&resolve_model(&wanted_model), &args.cache, args.device.as_deref()) {
+                Ok(other) => {
+                    println!("switched to the {} model on {}", other.model, other.device);
+                    seg = other;
+                    loaded = wanted_model;
+                }
+                Err(e) => {
+                    // Keep the working model and put the setting back, so the
+                    // panel shows what is running rather than what was asked
+                    // for and refused.
+                    eprintln!("cannot load the {wanted_model} model: {e:#}");
+                    settings.lock().expect("settings mutex poisoned").model = loaded.clone();
+                }
+            }
+        }
 
         let t = Instant::now();
         mask.copy_from_slice(seg.infer()?);

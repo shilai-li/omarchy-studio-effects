@@ -21,6 +21,8 @@ usage: studio-effects [command]
   desat <0-100>                drain colour from the background
   framing on|off               track the subject and keep them centred
   zoom <100-300>               how far framing may crop in; 200 is 2x
+  model <name>                 which model segments; `status` lists the
+                               installed ones. Swaps live, in about 15 ms
   preview on|off               publish preview frames for the bar widget
 
 With no command, prints status. Every command answers with the daemon's full

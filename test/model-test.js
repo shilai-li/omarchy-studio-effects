@@ -345,6 +345,46 @@ check("stepping blur stays inside the daemon's range", () => {
   eq(M.stepBlur({ blur: 0 }, -1), 0)
 })
 
+// ---- The model row.
+
+const TWO = '{"effect":"blur","blur":12,"passes":1,"dim":0,"desat":0,' +
+            '"model":"matting","models":["matting","segmentation"]}'
+
+check("the model and the installed list are read out of the reply", () => {
+  const st = M.parseStatus(TWO)
+  eq(st.model, "matting")
+  eq(st.models, ["matting", "segmentation"])
+})
+
+check("the model row appears only when there is something to switch to", () => {
+  const kinds = (json) => M.panelRows(M.parseStatus(json))
+      .filter((r) => r.kind === "choice").map((r) => r.key)
+  eq(kinds(TWO), ["model"])
+  // One installed model is not a choice, and a row that cycles back to what is
+  // already on is a control that does nothing.
+  eq(kinds('{"effect":"blur","model":"matting","models":["matting"]}'), [])
+  // A daemon too old to report either says nothing, and gets no row.
+  eq(kinds('{"effect":"blur","blur":12}'), [])
+})
+
+check("stepping the model wraps and never leaves the installed list", () => {
+  const st = M.parseStatus(TWO)
+  eq(M.stepChoice(st, "model", 1), "segmentation")
+  eq(M.stepChoice(st, "model", -1), "segmentation")
+  eq(M.stepChoice({ model: "segmentation", models: ["matting", "segmentation"] }, "model", 1),
+     "matting")
+  // A daemon running a model it did not list -- installed from elsewhere, or
+  // renamed underneath us -- still steps somewhere real rather than nowhere.
+  eq(M.stepChoice({ model: "gone", models: ["matting", "segmentation"] }, "model", 1), "matting")
+  eq(M.stepChoice({ model: "matting", models: [] }, "model", 1), "")
+})
+
+check("the model command names the model, and refuses to name nothing", () => {
+  eq(M.choiceCommand("model", "segmentation"), [M.BINARY, "model", "segmentation"])
+  eq(M.choiceCommand("model", ""), null)
+  eq(M.choiceCommand("nonsense", "segmentation"), null)
+})
+
 if (failures.length) {
   console.error(failures.length + " failed, " + passed + " passed\n")
   for (const f of failures) console.error("  " + f)

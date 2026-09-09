@@ -27,14 +27,16 @@ pub fn path() -> PathBuf {
     base.join("studio-effects/settings.json")
 }
 
-/// Only the settings the panel can change. Resolution, model and camera come
-/// from the config, and remembering them here would make editing that file
-/// look broken.
+/// Only the settings the panel can change. Resolution and camera come from the
+/// config, and remembering those here would make editing that file look broken.
+/// The model is included because it *is* panel-changeable now; whether it can
+/// actually be loaded is checked by the caller, which knows what is installed.
 fn render(settings: &Settings) -> String {
     format!(
-        r#"{{"effect":"{}","resume":"{}","blur":{},"passes":{},"dim":{},"desat":{},"framing":{},"zoom":{}}}"#,
+        r#"{{"effect":"{}","resume":"{}","model":"{}","blur":{},"passes":{},"dim":{},"desat":{},"framing":{},"zoom":{}}}"#,
         settings.effect.as_str(),
         settings.resume.as_str(),
+        settings.model,
         settings.blur,
         settings.passes,
         settings.dim,
@@ -78,6 +80,12 @@ pub fn restore(settings: &mut Settings) {
     let Ok(text) = std::fs::read_to_string(path()) else {
         return;
     };
+    restore_from(&text, settings);
+}
+
+/// Split out so the parsing can be tested without a file on disk.
+fn restore_from(text: &str, settings: &mut Settings) {
+    let text = text.to_string();
     if let Some(e) = field(&text, "effect").and_then(Effect::parse) {
         // `replace` is refused when no image is configured, exactly as the
         // socket refuses it: a remembered choice must not put the daemon
@@ -107,6 +115,13 @@ pub fn restore(settings: &mut Settings) {
     if let Some(v) = field(&text, "zoom").and_then(|v| v.parse::<u32>().ok()) {
         settings.zoom = v.clamp(100, 300);
     }
+    // Taken as written. Only the daemon knows which models exist, so it
+    // validates this against what it found and falls back if the name is gone.
+    if let Some(v) = field(&text, "model") {
+        if !v.is_empty() {
+            settings.model = v.to_string();
+        }
+    }
 }
 
 #[cfg(test)]
@@ -125,6 +140,7 @@ mod tests {
             resume: Effect::Blur,
             has_background: true,
             preview: false,
+            model: "segmentation".into(),
         }
     }
 
@@ -168,6 +184,27 @@ mod tests {
         assert_eq!(field(text, "effect"), Some("replace"));
         // The guard lives in restore(); this pins the shape it depends on.
         assert_eq!(Effect::parse("replace"), Some(Effect::Replace));
+    }
+
+    /// The model is remembered too, so switching from the panel survives the
+    /// camera being turned off and on.
+    #[test]
+    fn the_model_is_remembered() {
+        let mut chosen = settings();
+        chosen.model = "matting".into();
+        assert_eq!(field(&render(&chosen), "model"), Some("matting"));
+
+        let mut restored = settings();
+        restore_from(&render(&chosen), &mut restored);
+        assert_eq!(restored.model, "matting");
+    }
+
+    /// An empty name must not wipe the configured model.
+    #[test]
+    fn an_empty_model_name_is_ignored() {
+        let mut restored = settings();
+        restore_from(r#"{"model":"","blur":12}"#, &mut restored);
+        assert_eq!(restored.model, "segmentation");
     }
 
     #[test]

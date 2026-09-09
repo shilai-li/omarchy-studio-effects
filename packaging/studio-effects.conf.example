@@ -34,7 +34,10 @@ CAPTURE_HEIGHT=0
 #                 frames instead of shimmering.
 #
 # Both run on the NPU. Matting costs about 4 ms more of a 33 ms frame, which is
-# what the NPU's spare capacity is for.
+# what the NPU's spare capacity is for. Switchable while running from the bar
+# panel's "Model" row, or `studio-effects model matting`: the swap takes about
+# 15 ms from the compile cache, which is what makes comparing them on the same
+# face in the same light possible at all. This sets which one starts.
 MODEL=segmentation
 
 # Background blur radius, in pixels at the frame's own scale. Adjustable while

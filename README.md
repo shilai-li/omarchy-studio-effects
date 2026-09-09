@@ -231,6 +231,20 @@ between frames, because it carries state from one frame to the next rather than
 deciding each one afresh. It costs about 4 ms more of a 33 ms budget — which is
 what the NPU's spare capacity is for, since it otherwise sits under 1% busy.
 
+The config line only sets which one starts. Switch between them while the camera
+is running, from the panel's **Model** row or with:
+
+```bash
+studio-effects model matting
+```
+
+The swap takes about 15 ms once each model has been compiled, and the frame loop
+keeps running on the old one until the new one is ready — so the picture changes
+between one frame and the next, with the same face in the same light on either
+side of it. That is the only way to actually see the difference. The panel
+offers whichever models are installed and hides the row entirely when there is
+only one, so a machine with a single model gets no control that does nothing.
+
 ## Requirements
 
 An Intel Core Ultra with an NPU, though it falls back to the GPU and then the

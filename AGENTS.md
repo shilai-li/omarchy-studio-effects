@@ -263,6 +263,14 @@ reads as hair and edges hold still instead of shimmering. Both output
 `[1,1,256,256]`, which is why the second is a drop-in: the upscaler, the subject
 box and the blend are untouched.
 
+The model is switched live, not only at startup: the frame loop compares the
+requested name against the loaded one each pass and reloads on a change, keeping
+the old segmenter until the new one has compiled. A load that fails puts the old
+name back in the settings rather than leaving the panel showing a model that is
+not running. Which names exist is a directory scan -- installed models first,
+and the checkout's only when nothing is installed, never merged, or a working
+tree's half-converted leftovers become entries the panel offers.
+
 Getting RVM onto the NPU needed two things, and both failures looked like the
 model being unsuitable rather than the export being wrong. Its
 `downsample_ratio` is a runtime input, so the sizes inside its encoder depend on

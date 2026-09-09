@@ -75,14 +75,18 @@ pub struct Settings {
     /// the widget turns it on when its panel opens and off when it closes, so
     /// nothing is encoded for a picture nobody is looking at.
     pub preview: bool,
+    /// Which model finds the subject. Live, because comparing two models means
+    /// seeing them on the same face in the same light -- a restart apart, the
+    /// pose and the lighting have both moved and the comparison is worthless.
+    pub model: String,
 }
 
 /// Facts the socket reports but cannot change.
 pub struct Fixed {
     pub device: String,
-    /// Which model is loaded. Reported so the two can be told apart while
-    /// comparing them on the same camera.
-    pub model: String,
+    /// Every model installed. Discovered rather than hardcoded, so the panel
+    /// offers exactly what can actually be loaded.
+    pub models: Vec<String>,
     pub input: String,
     pub output: String,
     pub width: u32,
@@ -105,7 +109,7 @@ fn escape(text: &str) -> String {
 
 fn json(settings: &Settings, fixed: &Fixed, error: Option<&str>) -> String {
     let mut out = format!(
-        r#"{{"effect":"{}","blur":{},"passes":{},"dim":{},"desat":{},"framing":{},"zoom":{},"device":"{}","model":"{}","input":"{}","output":"{}","width":{},"height":{},"background":{},"preview":{},"previewPath":"{}""#,
+        r#"{{"effect":"{}","blur":{},"passes":{},"dim":{},"desat":{},"framing":{},"zoom":{},"device":"{}","model":"{}","models":[{}],"input":"{}","output":"{}","width":{},"height":{},"background":{},"preview":{},"previewPath":"{}""#,
         settings.effect.as_str(),
         settings.blur,
         settings.passes,
@@ -114,7 +118,13 @@ fn json(settings: &Settings, fixed: &Fixed, error: Option<&str>) -> String {
         settings.framing,
         settings.zoom,
         fixed.device,
-        escape(&fixed.model),
+        escape(&settings.model),
+        fixed
+            .models
+            .iter()
+            .map(|m| format!("\"{}\"", escape(m)))
+            .collect::<Vec<_>>()
+            .join(","),
         fixed.input,
         fixed.output,
         fixed.width,
@@ -143,13 +153,13 @@ fn handle(line: &str, settings: &Mutex<Settings>, fixed: &Fixed) -> String {
     let arg = words.next();
 
     let mut s = settings.lock().expect("settings mutex poisoned");
-    let mut error = None;
+    let mut error: Option<String> = None;
 
     match verb {
         "status" => {}
         "effect" => match arg.map(Effect::from_str_lenient) {
             Some(Some(Effect::Replace)) if !s.has_background => {
-                error = Some("no background image was loaded; start the daemon with --background")
+                error = Some("no background image was loaded; start the daemon with --background".into())
             }
             Some(Some(e)) => {
                 if e != Effect::None {
@@ -157,7 +167,7 @@ fn handle(line: &str, settings: &Mutex<Settings>, fixed: &Fixed) -> String {
                 }
                 s.effect = e;
             }
-            _ => error = Some("usage: effect none|blur|replace"),
+            _ => error = Some("usage: effect none|blur|replace".into()),
         },
         "toggle" => {
             s.effect = if s.effect == Effect::None {
@@ -169,34 +179,41 @@ fn handle(line: &str, settings: &Mutex<Settings>, fixed: &Fixed) -> String {
         "preview" => match arg {
             Some("on") => s.preview = true,
             Some("off") | None => s.preview = false,
-            _ => error = Some("usage: preview on|off"),
+            _ => error = Some("usage: preview on|off".into()),
         },
         "blur" => match arg.and_then(|a| a.parse::<usize>().ok()) {
             Some(n) if n <= 200 => s.blur = n,
-            _ => error = Some("usage: blur <0-200>"),
+            _ => error = Some("usage: blur <0-200>".into()),
         },
         "passes" => match arg.and_then(|a| a.parse::<usize>().ok()) {
             Some(n) if (1..=3).contains(&n) => s.passes = n,
-            _ => error = Some("usage: passes <1-3>"),
+            _ => error = Some("usage: passes <1-3>".into()),
         },
         "framing" => match arg {
             Some("on") => s.framing = true,
             Some("off") | None => s.framing = false,
-            _ => error = Some("usage: framing on|off"),
+            _ => error = Some("usage: framing on|off".into()),
         },
         "zoom" => match arg.and_then(|a| a.parse::<u32>().ok()) {
             Some(n) if (100..=300).contains(&n) => s.zoom = n,
-            _ => error = Some("usage: zoom <100-300>"),
+            _ => error = Some("usage: zoom <100-300>".into()),
         },
         "dim" => match arg.and_then(|a| a.parse::<u32>().ok()) {
             Some(n) if n <= 100 => s.dim = n,
-            _ => error = Some("usage: dim <0-100>"),
+            _ => error = Some("usage: dim <0-100>".into()),
         },
         "desat" => match arg.and_then(|a| a.parse::<u32>().ok()) {
             Some(n) if n <= 100 => s.desat = n,
-            _ => error = Some("usage: desat <0-100>"),
+            _ => error = Some("usage: desat <0-100>".into()),
         },
-        _ => error = Some("unknown command; try status, effect, toggle, preview, framing, zoom, blur, passes, dim or desat"),
+        "model" => match arg {
+            // Only what is installed. A name the daemon cannot load would
+            // leave the frame loop rebuilding a segmenter that fails on every
+            // frame, which is a far worse outcome than a refusal.
+            Some(name) if fixed.models.iter().any(|m| m == name) => s.model = name.to_string(),
+            _ => error = Some(format!("usage: model {}", fixed.models.join("|"))),
+        },
+        _ => error = Some("unknown command; try status, effect, model, toggle, preview, framing, zoom, blur, passes, dim or desat".into()),
     }
 
     // Saved on the way out of every change, not on shutdown: systemd stops the
@@ -206,7 +223,7 @@ fn handle(line: &str, settings: &Mutex<Settings>, fixed: &Fixed) -> String {
         crate::state::save(&s);
     }
 
-    json(&s, fixed, error)
+    json(&s, fixed, error.as_deref())
 }
 
 fn serve_one(stream: UnixStream, settings: &Mutex<Settings>, fixed: &Fixed) -> Result<()> {
@@ -263,7 +280,7 @@ mod tests {
     fn fixed() -> Fixed {
         Fixed {
             device: "NPU".into(),
-            model: "segmentation".into(),
+            models: vec!["segmentation".into(), "matting".into()],
             input: "/dev/video0".into(),
             output: "/dev/video10".into(),
             width: 1280,
@@ -284,6 +301,7 @@ mod tests {
             resume: Effect::Blur,
             has_background,
             preview: false,
+            model: "segmentation".into(),
         })
     }
 
@@ -332,6 +350,24 @@ mod tests {
         assert!(handle("passes 3", &s, &fixed()).contains(r#""passes":3"#));
         assert!(handle("dim 40", &s, &fixed()).contains(r#""dim":40"#));
         assert!(handle("desat 100", &s, &fixed()).contains(r#""desat":100"#));
+    }
+
+    /// Only installed models may be selected, and a refusal must name what is
+    /// actually available rather than a fixed pair.
+    #[test]
+    fn only_installed_models_can_be_selected() {
+        let s = settings(false);
+        assert!(handle("model matting", &s, &fixed()).contains(r#""model":"matting""#));
+        let out = handle("model deepfilternet", &s, &fixed());
+        assert!(out.contains(r#""error""#), "{out}");
+        assert!(out.contains("segmentation|matting"), "should list what exists: {out}");
+        assert!(out.contains(r#""model":"matting""#), "a refusal must not change it");
+    }
+
+    #[test]
+    fn status_lists_the_models_available() {
+        let s = settings(false);
+        assert!(handle("status", &s, &fixed()).contains(r#""models":["segmentation","matting"]"#));
     }
 
     #[test]

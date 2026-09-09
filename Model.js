@@ -80,7 +80,6 @@ function parseVoiceState(text) {
 // that starting failed.
 var SETTLE_ATTEMPTS = 10;
 var SETTLE_INTERVAL_MS = 400;
-function toggleCommand() { return command(["toggle"]); }
 
 function effectCommand(effect) {
     return isEffect(effect) ? command(["effect", effect]) : null;
@@ -116,8 +115,56 @@ var PARAMS = [
     { key: "desat",  label: "Desaturate", min: 0, max: 100, step: 10, effects: ["blur", "replace"] }
 ];
 
+// Settings whose value is one of a list the daemon supplies, rather than a
+// number or a flag. `values` names the field carrying the list: which models
+// are installed is discovered on the daemon's machine, so the widget cannot
+// hold that list itself and must be told.
+//
+// One row, stepped with the arrow keys, not one row per value. Two models is
+// two extra rows in a panel that already runs to a dozen, and the list only
+// gets longer as models are added.
+var CHOICES = [
+    { key: "model", label: "Model", values: "models" }
+];
+
+function choiceFor(key) {
+    for (var i = 0; i < CHOICES.length; i++)
+        if (CHOICES[i].key === key) return CHOICES[i];
+    return null;
+}
+
+// What the daemon says is installed. Never a fallback list: offering a model
+// this daemon does not have is a row that can only produce a refusal.
+function choiceValues(state, key) {
+    var spec = choiceFor(key);
+    if (!spec || !state) return [];
+    var list = state[spec.values];
+    return Array.isArray(list) ? list : [];
+}
+
+function choiceValue(state, key) {
+    return state && typeof state[key] === "string" ? state[key] : "";
+}
+
+// Wraps, because a list of two read as a pair of ends would need four presses
+// to get back where it started.
+function stepChoice(state, key, direction) {
+    var values = choiceValues(state, key);
+    if (values.length === 0) return "";
+    var at = values.indexOf(choiceValue(state, key));
+    var next = (at < 0 ? 0 : at + direction) % values.length;
+    return values[next < 0 ? next + values.length : next];
+}
+
+function choiceCommand(key, value) {
+    return choiceFor(key) && typeof value === "string" && value.length > 0
+        ? command([key, value]) : null;
+}
+
 // A setting counts as supported when the daemon reports a value for it: a
-// number for a slider, a boolean for a toggle.
+// number for a slider, a boolean for a toggle, and for a choice both a current
+// value and at least two to pick between -- a row that can only cycle back to
+// what is already on is a control that does nothing.
 function supportedParams(parsed) {
     var found = {};
     var ok = parsed !== null && typeof parsed === "object";
@@ -125,6 +172,11 @@ function supportedParams(parsed) {
         found[PARAMS[i].key] = ok && typeof parsed[PARAMS[i].key] === "number";
     for (var j = 0; j < TOGGLES.length; j++)
         found[TOGGLES[j].key] = ok && typeof parsed[TOGGLES[j].key] === "boolean";
+    for (var k = 0; k < CHOICES.length; k++) {
+        var spec = CHOICES[k];
+        found[spec.key] = ok && typeof parsed[spec.key] === "string"
+            && Array.isArray(parsed[spec.values]) && parsed[spec.values].length > 1;
+    }
     return found;
 }
 
@@ -190,6 +242,14 @@ function panelRows(state) {
         rows.push({ kind: "toggle", effect: "", key: TOGGLES[t].key });
     }
 
+    // Which model is segmenting governs both the effects and the framing --
+    // the mask feeds all of it -- so it sits with them rather than under any
+    // one of them, and above the sliders because it is set once and left.
+    for (var c = 0; c < CHOICES.length; c++) {
+        if (!supports[CHOICES[c].key]) continue;
+        rows.push({ kind: "choice", effect: "", key: CHOICES[c].key });
+    }
+
     var current = state ? state.effect : "none";
     for (var j = 0; j < PARAMS.length; j++) {
         if (PARAMS[j].effects.indexOf(current) === -1) continue;
@@ -235,6 +295,8 @@ function unknownState(reason) {
         dim: 0,
         desat: 0,
         framing: false,
+        model: "",
+        models: [],
         supports: supportedParams(null),
         preview: false,
         previewPath: "",
@@ -288,6 +350,13 @@ function parseStatus(text) {
         background: parsed.background === true,
         preview: parsed.preview === true,
         framing: parsed.framing === true,
+        // Which model is segmenting, and which the daemon found installed. The
+        // list is the daemon's own directory scan, so a machine with one model
+        // simply reports one and the row does not appear.
+        model: typeof parsed.model === "string" ? parsed.model : "",
+        models: Array.isArray(parsed.models)
+            ? parsed.models.filter(function (m) { return typeof m === "string"; })
+            : [],
         // Taken from the daemon rather than rebuilt here, so the two cannot
         // disagree about where the frames are.
         previewPath: typeof parsed.previewPath === "string" ? parsed.previewPath : "",
@@ -426,6 +495,12 @@ if (typeof module !== "undefined" && module.exports) {
         paramCommand: paramCommand,
         paramValue: paramValue,
         supportedParams: supportedParams,
+        CHOICES: CHOICES,
+        choiceFor: choiceFor,
+        choiceValues: choiceValues,
+        choiceValue: choiceValue,
+        stepChoice: stepChoice,
+        choiceCommand: choiceCommand,
         TOGGLES: TOGGLES,
         toggleFor: toggleFor,
         toggleCommand: toggleCommand,

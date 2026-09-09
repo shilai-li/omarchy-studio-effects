@@ -122,6 +122,8 @@ Panel {
     } else if (root.currentRow.kind === "toggle") {
       root.host.setToggle(root.currentRow.key,
                           !Model.toggleValue(root.state, root.currentRow.key))
+    } else if (root.currentRow.kind === "choice") {
+      root.adjustSelected(1)
     }
   }
 
@@ -130,9 +132,14 @@ Panel {
   // same keypress did different things depending on where you were, without
   // saying which.
   function adjustSelected(direction) {
-    if (!root.host || !root.currentRow || root.currentRow.kind !== "param") return
-    root.host.setParam(root.currentRow.key,
-                       Model.stepParam(root.state, root.currentRow.key, direction))
+    if (!root.host || !root.currentRow) return
+    if (root.currentRow.kind === "param") {
+      root.host.setParam(root.currentRow.key,
+                         Model.stepParam(root.state, root.currentRow.key, direction))
+    } else if (root.currentRow.kind === "choice") {
+      root.host.setChoice(root.currentRow.key,
+                          Model.stepChoice(root.state, root.currentRow.key, direction))
+    }
   }
 
   function togglePower() {
@@ -177,7 +184,9 @@ Panel {
 
     readonly property bool isParam: modelData && modelData.kind === "param"
     readonly property bool isToggle: modelData && modelData.kind === "toggle"
+    readonly property bool isChoice: modelData && modelData.kind === "choice"
     readonly property var toggleSpec: row.isToggle ? Model.toggleFor(modelData.key) : null
+    readonly property var choiceSpec: row.isChoice ? Model.choiceFor(modelData.key) : null
     readonly property string effect: modelData && modelData.effect ? modelData.effect : ""
     readonly property string paramKey: modelData && modelData.key ? modelData.key : ""
     readonly property var spec: row.isParam ? Model.paramFor(row.paramKey) : null
@@ -222,7 +231,7 @@ Panel {
       // steps it rather than doing nothing.
       onClicked: function (mouse) {
         root.selectedIndex = row.index
-        if (row.isParam) root.adjustSelected(mouse.x > row.width / 2 ? 1 : -1)
+        if (row.isParam || row.isChoice) root.adjustSelected(mouse.x > row.width / 2 ? 1 : -1)
         else root.chooseSelected()
       }
     }
@@ -247,6 +256,7 @@ Panel {
       anchors.verticalCenter: parent.verticalCenter
       textFormat: Text.PlainText
       text: row.isParam ? (row.spec ? row.spec.label : row.paramKey)
+          : row.isChoice ? (row.choiceSpec ? row.choiceSpec.label : row.paramKey)
           : row.isToggle ? (row.toggleSpec ? row.toggleSpec.label : row.paramKey)
           : row.effect === "none" ? "No effect"
           : row.effect === "blur" ? "Blur background"
@@ -263,12 +273,17 @@ Panel {
       anchors.right: parent.right
       anchors.rightMargin: Style.space(8)
       anchors.verticalCenter: parent.verticalCenter
-      visible: row.isParam || row.isToggle
+      visible: row.isParam || row.isToggle || row.isChoice
       textFormat: Text.PlainText
       text: {
         if (row.isToggle) return Model.toggleValue(root.state, row.paramKey) ? "On" : "Off"
-        if (!row.isParam) return ""
-        var v = Model.paramValue(root.state, row.paramKey)
+        // The daemon's own name for it, not a prettier one: it is what the
+        // config file takes and what `studio-effects model` takes, and a
+        // second name for the same thing is a thing to get wrong.
+        var v = row.isChoice ? Model.choiceValue(root.state, row.paramKey)
+              : row.isParam ? Model.paramValue(root.state, row.paramKey)
+              : ""
+        if (!row.isParam && !row.isChoice) return ""
         return row.hasCursor ? "\u2039 " + v + " \u203a" : String(v)
       }
       color: row.isToggle && Model.toggleValue(root.state, row.paramKey) ? root.accentColor
@@ -633,6 +648,8 @@ Panel {
           text: !root.running ? "c camera   v voice   esc close"
               : root.currentRow && root.currentRow.kind === "param"
               ? "↑↓ move   ←→ adjust   c off   v voice   esc close"
+              : root.currentRow && root.currentRow.kind === "choice"
+              ? "↑↓ move   ←→ switch   c off   v voice   esc close"
               : root.currentRow && root.currentRow.kind === "toggle"
               ? "↑↓ move   enter switch   c off   v voice   esc close"
               : "↑↓ move   enter choose   c off   v voice   esc close"
