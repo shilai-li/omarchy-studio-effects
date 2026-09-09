@@ -322,6 +322,25 @@ AGENTS.md for the per-stage numbers.
 See [AGENTS.md](AGENTS.md) for the architecture, the measurements it rests on,
 and house style.
 
+## Third-party models
+
+The code here is MIT. The models are not mine and carry their own terms.
+
+| model | upstream | licence | shipped how |
+|---|---|---|---|
+| `segmentation` | [MediaPipe Selfie Segmentation](https://huggingface.co/onnx-community/mediapipe_selfie_segmentation), Google | Apache-2.0 | `models/selfie_segmentation.onnx` is committed here |
+| `matting` | [RobustVideoMatting](https://github.com/PeterL1n/RobustVideoMatting), Peter Lin | GPL-3.0 | fetched at build time, not redistributed in this repo |
+
+Both are converted to OpenVINO IR by `tools/convert.py` at package build time;
+the `.xml`/`.bin` pairs are build products of whichever model they came from and
+inherit its licence.
+
+If you package this for others, note that a package built with the default
+`PKGBUILD` contains GPL-3.0 material, which is why its `license` field names
+all three. Building with only `segmentation` avoids that — the daemon runs fine
+with one model installed, and the panel then hides the Model row.
+
 ## License
 
-MIT. See [LICENSE](LICENSE).
+MIT for the code in this repository. See [LICENSE](LICENSE), and the table
+above for the models.

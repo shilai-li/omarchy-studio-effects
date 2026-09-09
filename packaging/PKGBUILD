@@ -5,7 +5,13 @@ pkgrel=1
 pkgdesc="NPU-accelerated camera background effects for Omarchy"
 arch=('x86_64')
 url="https://github.com/shilai-li/omarchy-studio-effects"
-license=('MIT')
+# Three, because a built package is not only this repository. MIT covers the
+# daemon, the widget and the tools; the models keep their own terms and are
+# installed into /usr/share/studio-effects/models as build products of them:
+# Apache-2.0 for segmentation (MediaPipe, Google) and GPL-3.0 for matting
+# (RobustVideoMatting, fetched in source= below). Drop that source and the
+# matting line in build() and the package really is MIT alone.
+license=('MIT' 'Apache-2.0' 'GPL-3.0')
 
 # gst-plugins-good carries v4l2src and v4l2sink; -base carries videoconvert,
 # videoscale and appsrc/appsink; -bad carries the jpeg decoding decodebin picks
