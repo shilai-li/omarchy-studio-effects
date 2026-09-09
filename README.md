@@ -202,8 +202,12 @@ the running daemon instead:
 studio-effects                    # or `status` -- what it is doing now, as JSON
 studio-effects toggle             # effects off, or back on to the last one
 studio-effects effect replace
-studio-effects blur 40
+studio-effects blur 40            # and passes 1-3, dim 0-100, desat 0-100
+studio-effects framing on         # and zoom 100-300, how far it may crop in
+studio-effects model matting      # `status` lists the installed ones
 ```
+
+`studio-effects --help` is the full list.
 
 Every command answers with the daemon's full state, so a caller never has to ask
 twice, and a refused change is an error in the JSON *and* a non-zero exit.
@@ -259,6 +263,38 @@ permissions on `/dev/accel/accel0`. It is world-accessible on a current Arch
 system; if yours is `0660 root render`, join that group **and reboot** -- logging
 out is not enough, because your terminals inherit their groups from a
 `systemd --user` manager that a logout does not restart.
+
+### After an OpenVINO update, rebuild
+
+If the camera stops working right after a system upgrade and the panel says the
+daemon is not answering, this is almost certainly why:
+
+```
+$ journalctl --user -u studio-effects -n 5
+studio-effects-daemon: error while loading shared libraries:
+libopenvino_c.so.2630: cannot open shared object file
+```
+
+OpenVINO's soname is its version with the dots removed -- 2026.3.0 is
+`libopenvino_c.so.2630`, 2026.3.1 is `.so.2631` -- so *every* release, patch
+releases included, breaks a binary linked against the one before it. The daemon
+dies in the dynamic loader before `main()`, exits 127, and systemd retries until
+it hits the restart limit. Nothing is wrong with the daemon; its library is
+gone. Rebuild and reinstall:
+
+```bash
+cd packaging
+makepkg -fi
+systemctl --user reset-failed studio-effects   # clear the restart limit
+systemctl --user restart studio-effects
+```
+
+`reset-failed` matters: after four crashes systemd refuses to start the unit at
+all until that counter is cleared, so without it the reinstall looks like it
+did not help.
+
+`pacman` cannot warn about this. The `openvino` package declares no sonames, so
+`depends=('openvino')` stays satisfied across the break.
 
 ## Development
 

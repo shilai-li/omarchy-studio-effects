@@ -515,13 +515,20 @@ service rather than at compile time. `test/unit-args-test.sh` runs the daemon
 with the unit's own ExecStart so this cannot come back.
 
 **Adding a setting means four places, and the parser is the one that gets
-forgotten.** `Model.PARAMS` is the single list the panel builds its rows from,
-so a new knob needs: the daemon's `Settings` and its socket command, the
-`json()` reply, `PARAMS`, and **`parseStatus`**. Skipping the last one is
-silent: the panel renders a row, the daemon accepts changes, and the value sits
-at its minimum while the daemon plainly uses something else. It showed up as
-Smoothness reading 1 against a daemon reporting 2. A test now walks `PARAMS`
-against a parsed reply so that fails instead.
+forgotten.** A new knob needs: the daemon's `Settings` and its socket command,
+the `json()` reply, one of the widget's row lists, and **`parseStatus`**.
+Skipping the last one is silent: the panel renders a row, the daemon accepts
+changes, and the value sits at its minimum while the daemon plainly uses
+something else. It showed up as Smoothness reading 1 against a daemon reporting
+2. A test now walks `PARAMS` against a parsed reply so that fails instead.
+
+`panelRows` walks three lists, not one, and which you want is decided by how the
+row is operated rather than by what it holds: `PARAMS` is stepped with the arrow
+keys, `TOGGLES` is flipped with enter, `CHOICES` is one of a set the daemon
+supplies. A choice is five places, not four, because the daemon reports both the
+current value and the list of them -- `supportedParams` wants both before it
+will show the row, which is what makes a machine with one model installed get no
+Model row instead of a row that cycles back to itself.
 
 **One glyph, and state lives in the tooltip.** The bar icon started as a camera
 and stopped being honest once the same widget also switched a microphone
@@ -651,6 +658,13 @@ a stale edge for one frame is invisible, a stutter is not.
 
 cd daemon && cargo test             # reference tests for the hot loops and the mask
 bash test/unit-args-test.sh         # the systemd unit's arguments, against the real daemon
+
+# After an OpenVINO update the daemon dies in the loader (exit 127, "cannot open
+# libopenvino_c.so.<version with the dots removed>"). Cargo will NOT fix it on
+# its own: no source changed, so it reuses the linked binary and prints
+# `Finished` over a broken one. Force the relink, and check what you got.
+touch daemon/src/main.rs && cargo build --release --manifest-path daemon/Cargo.toml
+ldd daemon/target/release/studio-effects-daemon | grep openvino_c
 
 omarchy plugin validate .           # manifest + entry points
 bash test/model-test.sh             # Model.js under plain node, no compositor
