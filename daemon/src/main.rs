@@ -513,10 +513,6 @@ fn main() -> Result<()> {
         let y_in = in_frame.plane_data(0)?;
         let uv_in = in_frame.plane_data(1)?;
 
-        let t = Instant::now();
-        nv12::write_model_input(y_in, uv_in, cw, ch, y_stride, uv_stride, seg.input_buffer()?);
-        timings.prep += t.elapsed().as_secs_f64() * 1e3;
-
         // Read once per frame: the socket thread may change these at any point,
         // and a frame that blurred with one radius and blended with another
         // would tear.
@@ -530,6 +526,15 @@ fn main() -> Result<()> {
         // would on any other first frame. Done here rather than on the socket
         // thread because the segmenter belongs to this loop and nothing else
         // may touch it mid-inference.
+        //
+        // It must also happen before the frame is written, not after. Writing
+        // first put the camera into the outgoing segmenter and then inferred on
+        // the incoming one, whose input tensor no one had written: `Tensor::new`
+        // hands back uninitialised memory, so the swap frame segmented whatever
+        // the allocator was holding. With `matting` that frame is not merely
+        // wrong, it is permanent -- the garbage becomes the recurrent state and
+        // is fed back for the life of the daemon, so switching models appeared
+        // to do nothing until the camera was turned off and on again.
         if wanted_model != loaded {
             match segmenter::Segmenter::new(&resolve_model(&wanted_model), &args.cache, args.device.as_deref()) {
                 Ok(other) => {
@@ -546,6 +551,10 @@ fn main() -> Result<()> {
                 }
             }
         }
+
+        let t = Instant::now();
+        nv12::write_model_input(y_in, uv_in, cw, ch, y_stride, uv_stride, seg.input_buffer()?);
+        timings.prep += t.elapsed().as_secs_f64() * 1e3;
 
         let t = Instant::now();
         mask.copy_from_slice(seg.infer()?);

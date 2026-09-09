@@ -286,6 +286,16 @@ the life of the daemon. It presents as a mask of zero -- every frame blurred,
 subject included -- with nothing logged and no error. The comment claiming the
 states start at zero was there before the code that made it true.
 
+**Swap the model before writing the frame into it, not after.** The loop wrote
+the camera into `seg`, then replaced `seg`, then inferred -- so the swap frame
+segmented the new segmenter's unwritten input tensor, which is `Tensor::new`'s
+uninitialised memory. On `segmentation` that is one bad frame. On `matting` it
+is every frame after, because the garbage becomes the recurrent state and is fed
+back forever, and the only cure is a restart: switching models looked like it
+did nothing until the camera was turned off and on. Same failure as the
+un-zeroed recurrent state, one call site along. Anything holding a borrow of the
+segmenter's buffers has to be re-done after a swap.
+
 **Static shapes, cached blobs.** The NPU plugin compiles only static shapes, and
 a first compile costs seconds (a second on the GPU already). `tools/convert.py`
 pins the batch at conversion time rather than reshaping at load, and the daemon
