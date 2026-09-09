@@ -14,7 +14,7 @@ from pathlib import Path
 import numpy as np
 import openvino as ov
 
-MODEL = Path(sys.argv[1] if len(sys.argv) > 1 else "models/selfie_segmentation.xml")
+MODEL = Path(sys.argv[1] if len(sys.argv) > 1 else "models/segmentation.xml")
 FPS = 30
 SECONDS = 8
 NPU_BUSY = Path("/sys/class/accel/accel0/device/npu_busy_time_us")

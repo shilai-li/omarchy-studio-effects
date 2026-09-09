@@ -53,7 +53,10 @@ def state_shapes(core, src: Path) -> dict:
 
 def main() -> None:
     src = Path(sys.argv[1] if len(sys.argv) > 1 else "models/selfie_segmentation.onnx")
-    dst = Path(sys.argv[2] if len(sys.argv) > 2 else "models/selfie_segmentation.xml")
+    # Named for what it is rather than for its paper, which is what the daemon,
+    # the package and the panel all call it. The .onnx keeps its upstream name
+    # because that is what it was downloaded as.
+    dst = Path(sys.argv[2] if len(sys.argv) > 2 else "models/segmentation.xml")
 
     core = ov.Core()
     model = core.read_model(src)

@@ -12,7 +12,7 @@ from pathlib import Path
 import numpy as np
 import openvino as ov
 
-MODEL = Path(sys.argv[1] if len(sys.argv) > 1 else "models/selfie_segmentation.xml")
+MODEL = Path(sys.argv[1] if len(sys.argv) > 1 else "models/segmentation.xml")
 CACHE = Path("/tmp/ov-cache")
 RUNS = 200
 
