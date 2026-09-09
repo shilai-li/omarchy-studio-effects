@@ -76,13 +76,18 @@ Panel {
     })
   }
 
+  // The hide goes first. Everything after it is cosmetic, and this panel is
+  // a full-screen layer-shell surface holding keyboard focus: a call that
+  // throws before the hide lands leaves the user with no way out of it and a
+  // bar that no longer answers. Nothing decorative gets to stand in front of
+  // the one line that releases the screen.
   function close() {
+    root.controller.hide()
     // Stop the encoder on the way out, not on the way in to the next open: a
     // panel closed on one monitor should cost nothing, and the daemon has no
     // other way to know nobody is watching.
     if (root.host) root.host.setPreview(false)
     root.setCenterHoverRevealSuppressed(false)
-    root.controller.hide()
   }
 
   function toggle() { root.opened ? root.close() : root.open() }
@@ -95,8 +100,16 @@ Panel {
 
   // Summoning by hotkey moves no pointer, so a hover the bar was still holding
   // must not keep the center indicators revealed behind the panel.
+  //
+  // The setter is the supported route: the `bar` a plugin is handed is a
+  // PluginBarApi facade, where this flag is readonly and backed by a scoped
+  // callback. Assigning to it throws rather than failing quietly, which is
+  // why the direct write is only the fallback for a host that predates the
+  // setter — and why it is now second.
   function setCenterHoverRevealSuppressed(value) {
-    if (root.bar && "centerHoverRevealSuppressed" in root.bar)
+    if (root.bar && typeof root.bar.setCenterHoverRevealSuppressed === "function")
+      root.bar.setCenterHoverRevealSuppressed(value)
+    else if (root.bar && "centerHoverRevealSuppressed" in root.bar)
       root.bar.centerHoverRevealSuppressed = value
   }
 
