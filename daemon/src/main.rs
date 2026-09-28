@@ -643,9 +643,12 @@ fn main() -> Result<()> {
                     // Repeated box blur converges on a Gaussian. Two passes is
                     // the point where the boxiness stops being visible against
                     // a hard edge, which is why it is the default.
+                    //
+                    // Chroma is half the resolution, so half the radius --
+                    // and two channels, which box_blur must never be given.
                     for _ in 0..passes {
                         nv12::box_blur(y_out, &mut scratch, w, h, out_y_stride, blur_radius);
-                        nv12::box_blur(uv_out, &mut scratch, w, h / 2, out_uv_stride, blur_radius / 2);
+                        nv12::box_blur_uv(uv_out, &mut scratch, w, h / 2, out_uv_stride, blur_radius / 2);
                     }
                 }
                 Effect::None => {}

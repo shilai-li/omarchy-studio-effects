@@ -77,18 +77,7 @@ pub fn box_blur(plane: &mut [u8], scratch: &mut [u8], w: usize, h: usize, stride
         return;
     }
     let r = r.min(w - 1).min(h - 1);
-    // 24-bit fixed-point reciprocal of the window, so the average is a multiply
-    // and a shift rather than a per-pixel divide.
-    //
-    // Both roundings here are load-bearing. Truncating the reciprocal, or the
-    // product, biases every pixel downward: with a window of 11, a flat plane of
-    // 200 blurs to 199, so a still background visibly darkens as soon as effects
-    // come on. Rounding the reciprocal to nearest and adding a half before the
-    // shift keeps a flat plane exactly flat, which `blur_of_a_flat_plane_is_flat`
-    // pins down.
-    let window = (2 * r + 1) as u64;
-    let recip = ((1u64 << 24) + window / 2) / window;
-    let avg = |sum: u32| ((u64::from(sum) * recip + (1 << 23)) >> 24) as u8;
+    let avg = window_average(r);
 
     // Horizontal: plane -> scratch, packed to width so the vertical pass can
     // scan rows without the stride's padding in the way.
@@ -106,8 +95,79 @@ pub fn box_blur(plane: &mut [u8], scratch: &mut [u8], w: usize, h: usize, stride
         }
     }
 
-    // Vertical: scratch -> plane, one running sum per column, advanced a whole
-    // row at a time.
+    blur_columns(plane, scratch, w, h, stride, r, avg);
+}
+
+/// Box blur an interleaved chroma plane, U and V each on their own.
+///
+/// NV12 stores chroma as U,V,U,V, and `box_blur` sees a row of bytes, so
+/// running it here averages every U with the Vs beside it. That is what this
+/// replaced, and it is not a subtle error: a red wall (U,V 90,240) came out
+/// 159,171, skin tones (110,150) nearly grey at 128,132, and every coloured
+/// background drifted toward magenta-grey the moment the blur came on. A
+/// single-channel test could never see it, which is why
+/// `chroma_blur_keeps_u_and_v_apart` exists.
+///
+/// The fix is only horizontal. A column of this plane is all U or all V, so the
+/// vertical pass is `box_blur`'s own.
+///
+/// `w` is the row length in bytes, as for `box_blur`; `r` is in chroma samples,
+/// so the old call's `r / 2` bytes -- a quarter of the luma radius -- is now
+/// the half it was meant to be.
+pub fn box_blur_uv(plane: &mut [u8], scratch: &mut [u8], w: usize, h: usize, stride: usize, r: usize) {
+    let n = w / 2;
+    if r == 0 || n == 0 || h == 0 {
+        return;
+    }
+    let r = r.min(n - 1).min(h - 1);
+    let avg = window_average(r);
+
+    for row in 0..h {
+        let src = &plane[row * stride..row * stride + 2 * n];
+        let dst = &mut scratch[row * 2 * n..(row + 1) * 2 * n];
+        for c in 0..2 {
+            let at = |x: usize| u32::from(src[2 * x + c]);
+            let mut sum: u32 = at(0) * (r + 1) as u32;
+            for x in 1..=r {
+                sum += at(x.min(n - 1));
+            }
+            for x in 0..n {
+                dst[2 * x + c] = avg(sum);
+                sum += at((x + r + 1).min(n - 1));
+                sum -= at(x.saturating_sub(r));
+            }
+        }
+    }
+
+    blur_columns(plane, scratch, 2 * n, h, stride, r, avg);
+}
+
+/// The window average for a radius, as a 24-bit fixed-point reciprocal: a
+/// multiply and a shift rather than a per-pixel divide.
+///
+/// Both roundings here are load-bearing. Truncating the reciprocal, or the
+/// product, biases every pixel downward: with a window of 11, a flat plane of
+/// 200 blurs to 199, so a still background visibly darkens as soon as effects
+/// come on. Rounding the reciprocal to nearest and adding a half before the
+/// shift keeps a flat plane exactly flat, which `blur_of_a_flat_plane_is_flat`
+/// pins down.
+fn window_average(r: usize) -> impl Fn(u32) -> u8 + Copy {
+    let window = (2 * r + 1) as u64;
+    let recip = ((1u64 << 24) + window / 2) / window;
+    move |sum: u32| ((u64::from(sum) * recip + (1 << 23)) >> 24) as u8
+}
+
+/// Vertical pass, scratch -> plane: one running sum per column, advanced a
+/// whole row at a time.
+fn blur_columns(
+    plane: &mut [u8],
+    scratch: &[u8],
+    w: usize,
+    h: usize,
+    stride: usize,
+    r: usize,
+    avg: impl Fn(u32) -> u8,
+) {
     let mut sums: Vec<u32> = scratch[..w].iter().map(|&v| u32::from(v) * (r + 1) as u32).collect();
     for y in 1..=r {
         let row = &scratch[y.min(h - 1) * w..][..w];
@@ -723,6 +783,55 @@ mod tests {
             for col in 0..w {
                 assert_eq!(plane[row * stride + col], 200, "at {col},{row}");
             }
+        }
+    }
+
+    /// A flat colour must come out the colour it went in. Through the
+    /// single-channel blur this red came out 159,171, because every U was
+    /// averaged with the Vs beside it.
+    #[test]
+    fn chroma_blur_keeps_u_and_v_apart() {
+        let (w, h) = (64, 24);
+        for (u, v) in [(90u8, 240u8), (200, 90), (110, 150)] {
+            let mut plane = vec![0u8; w * h];
+            for pair in plane.chunks_exact_mut(2) {
+                pair.copy_from_slice(&[u, v]);
+            }
+            let mut scratch = vec![0u8; w * h];
+            box_blur_uv(&mut plane, &mut scratch, w, h, w, 6);
+            for (i, pair) in plane.chunks_exact(2).enumerate() {
+                assert_eq!((pair[0], pair[1]), (u, v), "pair {i} of {u},{v}");
+            }
+        }
+    }
+
+    /// Interleaved, the chroma blur must be exactly the single-channel blur run
+    /// on U and V as planes of their own -- and leave the stride's padding be.
+    #[test]
+    fn chroma_blur_matches_blurring_u_and_v_separately() {
+        let (w, h, stride) = (38, 15, 42);
+        let n = w / 2;
+        let mut plane = vec![0u8; stride * h];
+        for row in 0..h {
+            for col in 0..stride {
+                plane[row * stride + col] = ((row * 29 + col * 53) % 256) as u8;
+            }
+        }
+        for r in [1, 3, 7, 100] {
+            let mut want = plane.clone();
+            for c in 0..2 {
+                let mut channel: Vec<u8> =
+                    (0..n * h).map(|i| plane[(i / n) * stride + (i % n) * 2 + c]).collect();
+                let mut scratch = vec![0u8; n * h];
+                box_blur(&mut channel, &mut scratch, n, h, n, r);
+                for i in 0..n * h {
+                    want[(i / n) * stride + (i % n) * 2 + c] = channel[i];
+                }
+            }
+            let mut got = plane.clone();
+            let mut scratch = vec![0u8; w * h];
+            box_blur_uv(&mut got, &mut scratch, w, h, stride, r);
+            assert_eq!(got, want, "radius {r}");
         }
     }
 

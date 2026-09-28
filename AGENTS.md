@@ -231,6 +231,15 @@ blurred to 199: every still background darkened by a level the moment effects
 came on, uniformly enough that no one would see it and call it a bug. Both
 roundings in `box_blur` are load-bearing for that reason.
 
+It missed a bigger one, because every test handed it one channel. The chroma
+plane is U and V interleaved, and `main.rs` passed it to `box_blur` as if it
+were a row of one thing, so each U was averaged with the Vs beside it: a red
+wall (U,V 90,240) came out 159,171, skin tones nearly grey, every coloured
+background pulled toward magenta-grey. On a webcam that reads as the blur being
+a bit washed out, which nobody files. `box_blur_uv` keeps the two apart, at
+0.08 ms a pass over the version that mixed them at 720p, and
+`chroma_blur_keeps_u_and_v_apart` feeds it a colour rather than a grey.
+
 Note that a snapshot showing everything blurred is usually not a fault. The
 model wants a person filling a reasonable part of the frame; with the subject
 small or far the mask is legitimately near-empty and the whole frame blurs. Reach
