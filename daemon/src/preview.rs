@@ -28,6 +28,11 @@ const WIDTH: i32 = 320;
 /// that the encode never competes with the frame budget it is sampled from.
 const INTERVAL: Duration = Duration::from_millis(100);
 
+/// Offers in a row with nothing coming out before the encoder counts as
+/// stuck: two seconds. Nothing coming out of one offer is normal now -- the
+/// JPEG is collected on the next -- so a single empty pull says nothing.
+const STALLED: u32 = 20;
+
 pub struct Preview {
     pipeline: gst::Pipeline,
     src: gst_app::AppSrc,
@@ -35,6 +40,8 @@ pub struct Preview {
     path: PathBuf,
     temp: PathBuf,
     last: Option<Instant>,
+    /// Offers since the encoder last produced anything.
+    unanswered: u32,
 }
 
 impl Preview {
@@ -50,10 +57,13 @@ impl Preview {
         // Height follows the source's aspect, rounded to even for the encoder.
         let scaled_height = ((WIDTH as i64 * height as i64 / width.max(1) as i64) as i32).max(2) & !1;
 
+        // Scaled first and never converted: jpegenc takes NV12 as it is. The
+        // obvious `videoconvert ! videoscale` converts the whole frame to I420
+        // before throwing most of it away -- more than half the encode's cost
+        // at 1080p, 2.7 ms of CPU against 1.2.
         let desc = format!(
             "appsrc name=src format=time is-live=true \
-             ! videoconvert ! videoscale \
-             ! video/x-raw,format=I420,width={WIDTH},height={scaled_height} \
+             ! videoscale ! video/x-raw,width={WIDTH},height={scaled_height} \
              ! jpegenc quality=70 ! appsink name=sink max-buffers=1 drop=true sync=false"
         );
         let pipeline = gst::parse::launch(&desc)
@@ -83,10 +93,20 @@ impl Preview {
             path,
             temp,
             last: None,
+            unanswered: 0,
         })
     }
 
     /// Offer a composited frame. Encodes at most one per interval.
+    ///
+    /// Never waits for the encoder. What gets written is the JPEG the encoder
+    /// finished since the last offer, collected on the way in, and this frame
+    /// is handed over to be ready by the next one -- so the preview runs one
+    /// interval behind, and the frame loop does not stop for it. Waiting for
+    /// each JPEG, which is what this did first, held the loop 1.1 ms at 720p
+    /// and 2.8 ms at 1080p on every third frame the panel was open -- a late
+    /// frame on the call, for a picture a tenth of a second fresher. It holds
+    /// it 0.2 ms now. `cargo run --release --example preview_cost` measures it.
     ///
     /// Errors are returned rather than propagated into the frame loop by the
     /// caller: a preview that fails is a widget with a stale picture, which is
@@ -98,6 +118,8 @@ impl Preview {
         }
         self.last = Some(now);
 
+        let finished = self.sink.try_pull_sample(gst::ClockTime::ZERO);
+
         if self.src.caps().is_none() {
             self.src.set_caps(Some(&info.to_caps()?));
         }
@@ -105,10 +127,16 @@ impl Preview {
             .push_buffer(buffer.copy())
             .map_err(|e| anyhow::anyhow!("pushing a preview frame: {e:?}"))?;
 
-        let sample = self
-            .sink
-            .try_pull_sample(gst::ClockTime::from_mseconds(50))
-            .context("the preview encoder produced nothing")?;
+        let Some(sample) = finished else {
+            // Said once, not every interval: a broken encoder would otherwise
+            // fill the journal ten lines a second.
+            self.unanswered += 1;
+            if self.unanswered == STALLED {
+                anyhow::bail!("the preview encoder has produced nothing for {:?}", INTERVAL * STALLED);
+            }
+            return Ok(());
+        };
+        self.unanswered = 0;
         let encoded = sample.buffer().context("preview sample had no buffer")?;
         let map = encoded.map_readable()?;
 

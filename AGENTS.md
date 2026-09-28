@@ -57,6 +57,7 @@ daemon/src/device.rs     resolving a v4l2 device by card label
 daemon/src/framing.rs    where to crop so the subject stays centred
 daemon/src/control.rs    the unix-socket control protocol and its state
 daemon/src/bin/studio-effects.rs   the client that speaks it
+daemon/examples/preview_cost.rs    how long the preview holds up the frame loop
 packaging/               systemd units, PKGBUILD, example config
 ```
 
@@ -409,8 +410,16 @@ watching, taking the last frame with it, so a widget can never show a still of a
 camera that is no longer running. A frame left behind by a daemon that was
 killed rather than stopped is removed at the next start.
 
-Cost is inside the noise: 12.90 ms/frame with it off against 12.69-13.08 with it
-on, at 1080p, publishing about nine frames a second.
+It must never wait for the encoder, either. `offer` collects the JPEG finished
+since the last interval and hands over this frame for next time, so the preview
+runs a tenth of a second behind and the frame loop does not stop for it.
+Waiting, which is what it did first, held the loop 1.1 ms at 720p and 2.8 ms at
+1080p on every third frame the panel was open. This file once called that
+"inside the noise", measured with the timing line -- which does not time the
+preview at all. `cargo run --release --example preview_cost` times `offer`
+itself: 0.2 ms held now, and 1.2 ms of CPU per encode on GStreamer's thread,
+down from 2.7 at 1080p, because the frame is scaled before anything else touches
+it and `jpegenc` takes NV12 as it is.
 
 **Voice focus is on the CPU on purpose, and that is the interesting part.** The
 NPU thesis does not transfer to audio. Segmentation was worth moving because it
@@ -712,6 +721,7 @@ a stale edge for one frame is invisible, a stutter is not.
 /usr/bin/python3 tools/load.py      # per-device CPU cost at a real 30 fps cadence
 
 cd daemon && cargo test             # reference tests for the hot loops and the mask
+cargo run --release --example preview_cost   # the preview's cost, which the timing line cannot see
 bash test/unit-args-test.sh         # the systemd unit's arguments, against the real daemon
 
 # After an OpenVINO update the daemon dies in the loader (exit 127, "cannot open
