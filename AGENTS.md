@@ -302,6 +302,34 @@ cannot bring back the 199-for-200 darkening below.
 Only factors both planes divide into exactly are used, so the stretch lands on
 every row and column; anything else keeps the full-size blur.
 
+### AVX2, without giving up the CPUs that lack it
+
+The package builds for baseline x86-64, as Arch packages do, so the compiler
+may assume SSE2 and nothing newer: lanes half as wide as this machine's. Built
+for x86-64-v3 the CPU stages drop another 0.4-0.7 ms a frame -- and the binary
+dies with SIGILL on any CPU from before 2013, which is not a trade a camera
+effect gets to make. So the hot functions are compiled twice, by the
+`dispatch!` macro in `nv12.rs`, and pick their copy at run time. It matches the
+whole-program x86-64-v3 build within noise:
+
+| ms per frame, `frame_cost` | P-core | E-core |
+|---|---|---|
+| 720p, blur 12 x2 | 1.77 → **1.11** | 2.28 → **1.80** |
+| 1080p → 720p, blur 108 x3 | 2.57 → **1.98** | 3.59 → **3.09** |
+
+Against the morning these rounds started, that is 5.19 → 1.11 at the default
+and 8.83 → 1.98 for the 1080p-capture config.
+
+The rule that keeps it honest: **a dispatched body may only call
+`#[inline(always)]` code.** Whatever the compiler declines to inline is
+compiled once, for the baseline, and the AVX2 copy merely calls it -- nothing
+fails, the speed just quietly goes. The resample is not dispatched on purpose:
+its horizontal half is a gather, and AVX2 did nothing for it.
+
+On an AVX2 machine the tests would only ever run the AVX2 copies, so
+`the_avx2_and_baseline_copies_agree` forces the baseline ones as well and
+compares the bytes.
+
 ### Both hot loops have reference tests
 
 `cargo test` checks the fast paths against slow obvious ones -- a float bilinear

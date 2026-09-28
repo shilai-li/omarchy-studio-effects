@@ -8,8 +8,59 @@
 /// Model input side, and the side of the mask that comes back.
 pub const NET: usize = 256;
 
+/// Define a function whose body is compiled twice, for AVX2 and for baseline
+/// x86-64, with the copy chosen at run time.
+///
+/// The package is built for baseline x86-64, as Arch packages are, so the
+/// compiler may assume nothing past SSE2 and the blur's vertical pass and the
+/// blend get lanes half as wide as this machine has: 0.4-0.7 ms a frame. Building
+/// for x86-64-v3 would buy that back and crash with SIGILL on any CPU from
+/// before 2013, which is not a trade a camera effect gets to make. This keeps
+/// both.
+///
+/// The body must only call `#[inline(always)]` code. Anything the compiler
+/// declines to inline is compiled once, for the baseline, and the AVX2 copy
+/// just calls it.
+macro_rules! dispatch {
+    ($(#[$meta:meta])* $vis:vis fn $name:ident($($arg:ident: $ty:ty),* $(,)?) => $body:expr;) => {
+        $(#[$meta])*
+        $vis fn $name($($arg: $ty),*) {
+            #[cfg(target_arch = "x86_64")]
+            {
+                #[target_feature(enable = "avx2")]
+                fn avx2($($arg: $ty),*) {
+                    $body
+                }
+                if avx2_allowed() {
+                    // SAFETY: the CPU has just said it has AVX2.
+                    return unsafe { avx2($($arg),*) };
+                }
+            }
+            $body
+        }
+    };
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Set by a test to run the baseline copies on a machine that has AVX2,
+    /// which would otherwise never execute them. Per thread, so it cannot leak
+    /// into the tests running beside it.
+    static BASELINE_ONLY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(target_arch = "x86_64")]
+#[inline(always)]
+fn avx2_allowed() -> bool {
+    #[cfg(test)]
+    if BASELINE_ONLY.with(|b| b.get()) {
+        return false;
+    }
+    std::arch::is_x86_feature_detected!("avx2")
+}
+
 /// BT.601 limited-range YUV -> RGB, the range v4l2 webcams actually emit.
-#[inline]
+#[inline(always)]
 fn yuv_to_rgb(y: u8, u: u8, v: u8) -> (f32, f32, f32) {
     let y = (f32::from(y) - 16.0) * 1.164_383;
     let u = f32::from(u) - 128.0;
@@ -21,20 +72,20 @@ fn yuv_to_rgb(y: u8, u: u8, v: u8) -> (f32, f32, f32) {
     )
 }
 
+dispatch! {
 /// Fill a planar NCHW float tensor with the frame scaled to 256x256.
 ///
 /// Nearest-neighbour on purpose: the model runs at 256x256 and its output is a
 /// soft mask that gets bilinearly upscaled anyway, so a costlier sample here
 /// buys nothing a viewer could see.
-pub fn write_model_input(
-    y_plane: &[u8],
-    uv_plane: &[u8],
-    width: usize,
-    height: usize,
-    y_stride: usize,
-    uv_stride: usize,
-    out: &mut [f32],
-) {
+pub fn write_model_input(y_plane: &[u8], uv_plane: &[u8], width: usize, height: usize, y_stride: usize,
+                         uv_stride: usize, out: &mut [f32])
+    => model_input_rows(y_plane, uv_plane, width, height, y_stride, uv_stride, out);
+}
+
+#[inline(always)]
+fn model_input_rows(y_plane: &[u8], uv_plane: &[u8], width: usize, height: usize, y_stride: usize,
+                    uv_stride: usize, out: &mut [f32]) {
     debug_assert_eq!(out.len(), 3 * NET * NET);
     let (r_plane, rest) = out.split_at_mut(NET * NET);
     let (g_plane, b_plane) = rest.split_at_mut(NET * NET);
@@ -55,6 +106,7 @@ pub fn write_model_input(
     }
 }
 
+dispatch! {
 /// Box blur one plane in place, separably, via a packed scratch buffer.
 ///
 /// Running-sum, so cost is independent of radius -- the whole reason this is a
@@ -75,27 +127,15 @@ pub fn write_model_input(
 ///
 /// A second round took another quarter to a third off (P-core and E-core), for
 /// the same bytes out -- which `blur_is_what_it_was` pins against the version
-/// before it. The window is
-/// kept inside the row by clamping both of its ends, and that was done on
-/// every pixel although only the first and last `r + 1` ever need it; and the
-/// vertical pass walked the running sums twice a row, once to write and once
-/// to advance.
-pub fn box_blur(plane: &mut [u8], scratch: &mut [u8], w: usize, h: usize, stride: usize, r: usize) {
-    if r == 0 || w == 0 || h == 0 {
-        return;
-    }
-    let r = r.min(w - 1).min(h - 1);
-    let avg = window_average(r);
-
-    // Horizontal: plane -> scratch, packed to width so the vertical pass can
-    // scan rows without the stride's padding in the way.
-    for row in 0..h {
-        blur_row::<1>(&plane[row * stride..row * stride + w], &mut scratch[row * w..(row + 1) * w], r, avg);
-    }
-
-    blur_columns(plane, scratch, w, h, stride, r, avg);
+/// before it. The window is kept inside the row by clamping both of its ends,
+/// and that was done on every pixel although only the first and last `r + 1`
+/// ever need it; and the vertical pass walked the running sums twice a row,
+/// once to write and once to advance.
+pub fn box_blur(plane: &mut [u8], scratch: &mut [u8], w: usize, h: usize, stride: usize, r: usize)
+    => blur_plane::<1>(plane, scratch, w, h, stride, r);
 }
 
+dispatch! {
 /// Box blur an interleaved chroma plane, U and V each on their own.
 ///
 /// NV12 stores chroma as U,V,U,V, and `box_blur` sees a row of bytes, so
@@ -112,24 +152,32 @@ pub fn box_blur(plane: &mut [u8], scratch: &mut [u8], w: usize, h: usize, stride
 /// `w` is the row length in bytes, as for `box_blur`; `r` is in chroma samples,
 /// so the old call's `r / 2` bytes -- a quarter of the luma radius -- is now
 /// the half it was meant to be.
-pub fn box_blur_uv(plane: &mut [u8], scratch: &mut [u8], w: usize, h: usize, stride: usize, r: usize) {
-    let n = w / 2;
-    if r == 0 || n == 0 || h == 0 {
+pub fn box_blur_uv(plane: &mut [u8], scratch: &mut [u8], w: usize, h: usize, stride: usize, r: usize)
+    => blur_plane::<2>(plane, scratch, w / 2, h, stride, r);
+}
+
+/// The box blur itself, over `C` interleaved channels, `w` samples wide.
+#[inline(always)]
+fn blur_plane<const C: usize>(plane: &mut [u8], scratch: &mut [u8], w: usize, h: usize, stride: usize, r: usize) {
+    if r == 0 || w == 0 || h == 0 {
         return;
     }
-    let r = r.min(n - 1).min(h - 1);
+    let r = r.min(w - 1).min(h - 1);
     let avg = window_average(r);
+    let row_len = w * C;
 
+    // Horizontal: plane -> scratch, packed to width so the vertical pass can
+    // scan rows without the stride's padding in the way.
     for row in 0..h {
-        blur_row::<2>(
-            &plane[row * stride..row * stride + 2 * n],
-            &mut scratch[row * 2 * n..(row + 1) * 2 * n],
+        blur_row::<C>(
+            &plane[row * stride..row * stride + row_len],
+            &mut scratch[row * row_len..(row + 1) * row_len],
             r,
             avg,
         );
     }
 
-    blur_columns(plane, scratch, 2 * n, h, stride, r, avg);
+    blur_columns(plane, scratch, row_len, h, stride, r, avg);
 }
 
 /// The window average for a radius, as a 24-bit fixed-point reciprocal: a
@@ -145,6 +193,7 @@ pub fn box_blur_uv(plane: &mut [u8], scratch: &mut [u8], w: usize, h: usize, str
 /// In u32, which gives the same answer as the u64 it replaced and is half the
 /// lane width to vectorise: a sum is at most 255 * window, so sum * recip + 2^23
 /// stays under 2^32 for any window below 65,793 -- a radius of 32,896 rows.
+#[inline(always)]
 fn window_average(r: usize) -> impl Fn(u32) -> u8 + Copy {
     let window = (2 * r + 1) as u32;
     assert!(window < 65_793, "a blur radius of {r} is past what the average can hold");
@@ -204,6 +253,7 @@ fn blur_row<const C: usize>(src: &[u8], dst: &mut [u8], r: usize, avg: impl Fn(u
 /// Vertical pass, scratch -> plane: one running sum per column, advanced a
 /// whole row at a time -- written out and advanced in the same walk over the
 /// sums, rather than a walk for each.
+#[inline(always)]
 fn blur_columns(
     plane: &mut [u8],
     scratch: &[u8],
@@ -296,20 +346,23 @@ impl Blur {
         r: usize,
         passes: usize,
     ) {
+        blur_frame(self, y, uv, w, h, y_stride, uv_stride, r, passes);
+    }
+
+    #[inline(always)]
+    fn frame(&mut self, y: &mut [u8], uv: &mut [u8], w: usize, h: usize, y_stride: usize, uv_stride: usize,
+             r: usize, passes: usize) {
         let f = Self::factor(w, h, r);
         self.plane::<1>(y, w, h, y_stride, r, passes, f);
         self.plane::<2>(uv, w / 2, h / 2, uv_stride, r / 2, passes, f);
     }
 
     /// One plane of `C` channels, `w` samples wide, radius `r` in its samples.
+    #[inline(always)]
     fn plane<const C: usize>(&mut self, p: &mut [u8], w: usize, h: usize, stride: usize, r: usize, passes: usize, f: usize) {
         let blur = |q: &mut [u8], scratch: &mut [u8], w: usize, h: usize, stride: usize, r: usize| {
             for _ in 0..passes {
-                if C == 1 {
-                    box_blur(q, scratch, w, h, stride, r);
-                } else {
-                    box_blur_uv(q, scratch, 2 * w, h, stride, r);
-                }
+                blur_plane::<C>(q, scratch, w, h, stride, r);
             }
         };
         match f {
@@ -330,9 +383,18 @@ impl Blur {
     }
 }
 
+dispatch! {
+/// `Blur::apply`, as one function so the whole frame's blur is a single AVX2
+/// copy: shrink, blur and stretch together.
+fn blur_frame(b: &mut Blur, y: &mut [u8], uv: &mut [u8], w: usize, h: usize, y_stride: usize,
+              uv_stride: usize, r: usize, passes: usize)
+    => b.frame(y, uv, w, h, y_stride, uv_stride, r, passes);
+}
+
 /// Halve a plane of `C` interleaved channels, `w` samples wide, into `dst`
 /// packed: each sample the rounded mean of a 2x2 block. A flat plane stays
 /// exactly flat, (4v + 2) >> 2 being v.
+#[inline(always)]
 fn halve<const C: usize>(src: &[u8], w: usize, h: usize, stride: usize, dst: &mut [u8]) -> (usize, usize) {
     let (ow, oh) = (w / 2, h / 2);
     for y in 0..oh {
@@ -353,6 +415,7 @@ fn halve<const C: usize>(src: &[u8], w: usize, h: usize, stride: usize, dst: &mu
 /// aligned: output sample 2x sits a quarter of a sample left of x, and 2x + 1 a
 /// quarter right, so every output is a 3:1 mix of two inputs on each axis. The
 /// edges repeat. A flat plane stays exactly flat.
+#[inline(always)]
 fn double<const C: usize>(lo: &[u8], ow: usize, oh: usize, dst: &mut [u8], stride: usize, mix: &mut Vec<u16>) {
     let lw = ow * C;
     mix.resize(lw, 0);
@@ -706,7 +769,7 @@ impl MaskUpscaler {
 
     /// The two band rows bracketing output row `row` of `height`, and the
     /// 0..=256 weight toward the second.
-    #[inline]
+    #[inline(always)]
     fn rows(&self, row: usize, height: usize) -> (&[u8], &[u8], u32) {
         let y = self.y0 + self.y_span * row as f32 / height as f32;
         let y = y.clamp(0.0, (NET - 1) as f32);
@@ -720,6 +783,7 @@ impl MaskUpscaler {
     }
 }
 
+dispatch! {
 /// Blend the sharp luma plane over the blurred one, weighted by the mask.
 ///
 /// In u16, because everything fits: the mask lerp is at most 255 * 256, since
@@ -727,14 +791,12 @@ impl MaskUpscaler {
 /// 255 - a do. Half the lane width is twice the pixels per instruction, and the
 /// same bytes -- 3.4x on this machine's baseline build, where the u32 version
 /// left the compiler emulating a 32-bit multiply it has no instruction for.
-pub fn blend_luma(
-    fg: &[u8],
-    bg: &mut [u8],
-    up: &MaskUpscaler,
-    w: usize,
-    h: usize,
-    stride: usize,
-) {
+pub fn blend_luma(fg: &[u8], bg: &mut [u8], up: &MaskUpscaler, w: usize, h: usize, stride: usize)
+    => blend_luma_rows(fg, bg, up, w, h, stride);
+}
+
+#[inline(always)]
+fn blend_luma_rows(fg: &[u8], bg: &mut [u8], up: &MaskUpscaler, w: usize, h: usize, stride: usize) {
     for row in 0..h {
         let (m0, m1, vf) = up.rows(row, h);
         let (vf, keep) = (vf as u16, 256 - vf as u16);
@@ -748,20 +810,19 @@ pub fn blend_luma(
     }
 }
 
+dispatch! {
 /// Blend the interleaved chroma plane, which is half resolution in both axes.
 ///
 /// The band is built at luma width, so chroma column `c` reads band column
 /// `2 * c` -- no second upscale, and the U and V bytes of a pixel share one
 /// mask value rather than sampling it twice. Taken as pairs of the band, the
 /// same stride as the pairs of chroma, so the compiler sees one regular walk.
-pub fn blend_chroma(
-    fg: &[u8],
-    bg: &mut [u8],
-    up: &MaskUpscaler,
-    w: usize,
-    h: usize,
-    stride: usize,
-) {
+pub fn blend_chroma(fg: &[u8], bg: &mut [u8], up: &MaskUpscaler, w: usize, h: usize, stride: usize)
+    => blend_chroma_rows(fg, bg, up, w, h, stride);
+}
+
+#[inline(always)]
+fn blend_chroma_rows(fg: &[u8], bg: &mut [u8], up: &MaskUpscaler, w: usize, h: usize, stride: usize) {
     for row in 0..h {
         let (m0, m1, vf) = up.rows(row * 2, h * 2);
         let (vf, keep) = (vf as u16, 256 - vf as u16);
@@ -1326,6 +1387,57 @@ mod tests {
         let (mut y, mut uv) = (y0.clone(), uv0.clone());
         Blur::new(w, h).apply(&mut y, &mut uv, w, h, w, w, 20, 2);
         assert_eq!((y, uv), (want_y, want_uv));
+    }
+
+    /// Every dispatched function computed both ways: the AVX2 copy the tests
+    /// otherwise run on this machine, and the baseline copy an older CPU gets.
+    /// They are the same source compiled twice, and must give the same bytes.
+    #[test]
+    fn the_avx2_and_baseline_copies_agree() {
+        fn both<T: PartialEq + std::fmt::Debug>(what: &str, run: impl Fn() -> T) {
+            let fast = run();
+            BASELINE_ONLY.with(|b| b.set(true));
+            let baseline = run();
+            BASELINE_ONLY.with(|b| b.set(false));
+            assert!(fast == baseline, "{what}: the two copies differ");
+        }
+        let (w, h) = (640, 360);
+        let (y0, uv0) = room(w, h);
+        for r in [3, 12, 64] {
+            both("box_blur", || {
+                let mut y = y0.clone();
+                box_blur(&mut y, &mut vec![0u8; w * h], w, h, w, r);
+                y
+            });
+            both("box_blur_uv", || {
+                let mut uv = uv0.clone();
+                box_blur_uv(&mut uv, &mut vec![0u8; w * h], w, h / 2, w, r);
+                uv
+            });
+            both("Blur::apply", || {
+                let (mut y, mut uv) = (y0.clone(), uv0.clone());
+                Blur::new(w, h).apply(&mut y, &mut uv, w, h, w, w, r, 2);
+                (y, uv)
+            });
+        }
+        let mask: Vec<f32> = noise(9, NET * NET).iter().map(|&v| f32::from(v) / 255.0).collect();
+        let mut up = MaskUpscaler::new(w);
+        up.prepare(&mask);
+        both("blend_luma", || {
+            let mut bg = uv0.repeat(2);
+            blend_luma(&y0, &mut bg, &up, w, h, w);
+            bg
+        });
+        both("blend_chroma", || {
+            let mut bg = y0[..w * h / 2].to_vec();
+            blend_chroma(&uv0, &mut bg, &up, w / 2, h / 2, w);
+            bg
+        });
+        both("write_model_input", || {
+            let mut out = vec![0f32; 3 * NET * NET];
+            write_model_input(&y0, &uv0, w, h, w, w, &mut out);
+            out.iter().map(|v| v.to_bits()).collect::<Vec<_>>()
+        });
     }
 
     /// The fast blur must match a naive box blur with the same edge clamping.
