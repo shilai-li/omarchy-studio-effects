@@ -72,6 +72,14 @@ pub fn write_model_input(
 /// natural way to write it and reads one byte from each of `h` cache lines,
 /// missing on nearly every access. Carrying a running sum per column instead
 /// turns the whole pass into sequential row scans.
+///
+/// A second round took another quarter to a third off (P-core and E-core), for
+/// the same bytes out -- which `blur_is_what_it_was` pins against the version
+/// before it. The window is
+/// kept inside the row by clamping both of its ends, and that was done on
+/// every pixel although only the first and last `r + 1` ever need it; and the
+/// vertical pass walked the running sums twice a row, once to write and once
+/// to advance.
 pub fn box_blur(plane: &mut [u8], scratch: &mut [u8], w: usize, h: usize, stride: usize, r: usize) {
     if r == 0 || w == 0 || h == 0 {
         return;
@@ -82,17 +90,7 @@ pub fn box_blur(plane: &mut [u8], scratch: &mut [u8], w: usize, h: usize, stride
     // Horizontal: plane -> scratch, packed to width so the vertical pass can
     // scan rows without the stride's padding in the way.
     for row in 0..h {
-        let src = &plane[row * stride..row * stride + w];
-        let dst = &mut scratch[row * w..(row + 1) * w];
-        let mut sum: u32 = u32::from(src[0]) * (r + 1) as u32;
-        for x in 1..=r {
-            sum += u32::from(src[x.min(w - 1)]);
-        }
-        for x in 0..w {
-            dst[x] = avg(sum);
-            sum += u32::from(src[(x + r + 1).min(w - 1)]);
-            sum -= u32::from(src[x.saturating_sub(r)]);
-        }
+        blur_row::<1>(&plane[row * stride..row * stride + w], &mut scratch[row * w..(row + 1) * w], r, avg);
     }
 
     blur_columns(plane, scratch, w, h, stride, r, avg);
@@ -123,20 +121,12 @@ pub fn box_blur_uv(plane: &mut [u8], scratch: &mut [u8], w: usize, h: usize, str
     let avg = window_average(r);
 
     for row in 0..h {
-        let src = &plane[row * stride..row * stride + 2 * n];
-        let dst = &mut scratch[row * 2 * n..(row + 1) * 2 * n];
-        for c in 0..2 {
-            let at = |x: usize| u32::from(src[2 * x + c]);
-            let mut sum: u32 = at(0) * (r + 1) as u32;
-            for x in 1..=r {
-                sum += at(x.min(n - 1));
-            }
-            for x in 0..n {
-                dst[2 * x + c] = avg(sum);
-                sum += at((x + r + 1).min(n - 1));
-                sum -= at(x.saturating_sub(r));
-            }
-        }
+        blur_row::<2>(
+            &plane[row * stride..row * stride + 2 * n],
+            &mut scratch[row * 2 * n..(row + 1) * 2 * n],
+            r,
+            avg,
+        );
     }
 
     blur_columns(plane, scratch, 2 * n, h, stride, r, avg);
@@ -151,14 +141,69 @@ pub fn box_blur_uv(plane: &mut [u8], scratch: &mut [u8], w: usize, h: usize, str
 /// come on. Rounding the reciprocal to nearest and adding a half before the
 /// shift keeps a flat plane exactly flat, which `blur_of_a_flat_plane_is_flat`
 /// pins down.
+///
+/// In u32, which gives the same answer as the u64 it replaced and is half the
+/// lane width to vectorise: a sum is at most 255 * window, so sum * recip + 2^23
+/// stays under 2^32 for any window below 65,793 -- a radius of 32,896 rows.
 fn window_average(r: usize) -> impl Fn(u32) -> u8 + Copy {
-    let window = (2 * r + 1) as u64;
-    let recip = ((1u64 << 24) + window / 2) / window;
-    move |sum: u32| ((u64::from(sum) * recip + (1 << 23)) >> 24) as u8
+    let window = (2 * r + 1) as u32;
+    assert!(window < 65_793, "a blur radius of {r} is past what the average can hold");
+    let recip = ((1u32 << 24) + window / 2) / window;
+    move |sum: u32| ((sum * recip + (1 << 23)) >> 24) as u8
+}
+
+/// One row of the horizontal pass, over `C` interleaved channels: one for
+/// luma, two for chroma.
+///
+/// The window is clamped to the row at both ends, and only the first and last
+/// `r + 1` samples ever need it, so the row is walked as those two edges and an
+/// interior that indexes directly.
+#[inline(always)]
+fn blur_row<const C: usize>(src: &[u8], dst: &mut [u8], r: usize, avg: impl Fn(u32) -> u8) {
+    let n = src.len() / C;
+    let last = n - 1;
+    for c in 0..C {
+        let at = |x: usize| u32::from(src[x * C + c]);
+        let mut sum = at(0) * (r + 1) as u32;
+        for x in 1..=r {
+            sum += at(x.min(last));
+        }
+        // Left edge: the sample leaving the window is always the first.
+        let p1 = (r + 1).min(n);
+        for x in 0..p1 {
+            dst[x * C + c] = avg(sum);
+            sum += at((x + r + 1).min(last));
+            sum -= at(0);
+        }
+        // Interior: both ends of the window inside the row. A row narrower
+        // than the window has none, and the slices below would start past its
+        // end.
+        let p2 = n.saturating_sub(r + 1).max(p1);
+        if C == 1 && p1 < p2 {
+            let adds = &src[p1 + r + 1..p2 + r + 1];
+            let subs = &src[p1 - r..p2 - r];
+            for ((d, &a), &s) in dst[p1..p2].iter_mut().zip(adds).zip(subs) {
+                *d = avg(sum);
+                sum = sum + u32::from(a) - u32::from(s);
+            }
+        } else {
+            for x in p1..p2 {
+                dst[x * C + c] = avg(sum);
+                sum = sum + at(x + r + 1) - at(x - r);
+            }
+        }
+        // Right edge: the sample entering is always the last.
+        for x in p2..n {
+            dst[x * C + c] = avg(sum);
+            sum += at(last);
+            sum -= at(x - r);
+        }
+    }
 }
 
 /// Vertical pass, scratch -> plane: one running sum per column, advanced a
-/// whole row at a time.
+/// whole row at a time -- written out and advanced in the same walk over the
+/// sums, rather than a walk for each.
 fn blur_columns(
     plane: &mut [u8],
     scratch: &[u8],
@@ -177,12 +222,10 @@ fn blur_columns(
     }
     for y in 0..h {
         let out = &mut plane[y * stride..y * stride + w];
-        for (o, &s) in out.iter_mut().zip(sums.iter()) {
-            *o = avg(s);
-        }
         let add = &scratch[(y + r + 1).min(h - 1) * w..][..w];
         let sub = &scratch[y.saturating_sub(r) * w..][..w];
-        for ((s, &a), &b) in sums.iter_mut().zip(add).zip(sub) {
+        for (((o, s), &a), &b) in out.iter_mut().zip(sums.iter_mut()).zip(add).zip(sub) {
+            *o = avg(*s);
             *s = *s + u32::from(a) - u32::from(b);
         }
     }
@@ -236,6 +279,8 @@ pub struct Resampler {
     x_next: Vec<u32>,
     x_frac: Vec<u32>,
     width: usize,
+    /// One source row's worth of the vertical lerp, before the horizontal one.
+    column_mix: Vec<u16>,
 }
 
 impl Resampler {
@@ -245,6 +290,7 @@ impl Resampler {
             x_next: vec![0; width],
             x_frac: vec![0; width],
             width,
+            column_mix: Vec::new(),
         }
     }
 
@@ -275,8 +321,16 @@ impl Resampler {
     /// Split from the chroma version rather than taking a byte count, because a
     /// loop bound the compiler cannot see is a loop it will not unroll or
     /// vectorise -- and this runs on every pixel of every frame.
+    ///
+    /// Vertical first, over the whole source span as one contiguous run, then
+    /// the horizontal gather from that single row: two loads a pixel where
+    /// mixing four source pixels per output took four, and the vertical half
+    /// vectorises. Bilinear is the same polynomial whichever axis goes first
+    /// and neither order rounds in between, so the bytes are the ones the
+    /// four-tap version made -- `resampling_is_what_it_was` holds it to that --
+    /// at 1.6-1.8x the speed.
     pub fn luma(
-        &self,
+        &mut self,
         src: &[u8],
         dst: &mut [u8],
         src_stride: usize,
@@ -286,25 +340,26 @@ impl Resampler {
         span: f32,
         src_rows: usize,
     ) {
+        // The tables only ever step forward, so this is every column read.
+        let lo = self.x_idx[0] as usize;
+        let hi = self.x_next[self.width - 1] as usize + 1;
+        self.column_mix.resize(hi - lo, 0);
         for row in 0..height {
             let (y0, y1, yf) = Self::rows_for(row, height, top, span, src_rows);
-            let (r0, r1) = (y0 * src_stride, y1 * src_stride);
-            let out = &mut dst[row * dst_stride..row * dst_stride + self.width];
+            self.mix_rows(&src[y0 * src_stride + lo..y0 * src_stride + hi], &src[y1 * src_stride + lo..y1 * src_stride + hi], yf);
 
+            let out = &mut dst[row * dst_stride..row * dst_stride + self.width];
             for (col, o) in out.iter_mut().enumerate() {
-                let (x0, x1) = (self.x_idx[col] as usize, self.x_next[col] as usize);
-                let xf = self.x_frac[col];
-                let top_row = u32::from(src[r0 + x0]) * (256 - xf) + u32::from(src[r0 + x1]) * xf;
-                let bot_row = u32::from(src[r1 + x0]) * (256 - xf) + u32::from(src[r1 + x1]) * xf;
-                *o = ((top_row * (256 - yf) + bot_row * yf) >> 16) as u8;
+                let (x0, x1) = (self.x_idx[col] as usize - lo, self.x_next[col] as usize - lo);
+                *o = Self::lerp_mixed(self.column_mix[x0], self.column_mix[x1], self.x_frac[col]);
             }
         }
     }
 
     /// Resample an interleaved chroma plane, where U and V move together and
-    /// share one set of weights.
+    /// share one set of weights. Vertical first, as `luma`.
     pub fn chroma(
-        &self,
+        &mut self,
         src: &[u8],
         dst: &mut [u8],
         src_stride: usize,
@@ -314,23 +369,40 @@ impl Resampler {
         span: f32,
         src_rows: usize,
     ) {
+        let lo = self.x_idx[0] as usize * 2;
+        let hi = self.x_next[self.width - 1] as usize * 2 + 2;
+        self.column_mix.resize(hi - lo, 0);
         for row in 0..height {
             let (y0, y1, yf) = Self::rows_for(row, height, top, span, src_rows);
-            let (r0, r1) = (y0 * src_stride, y1 * src_stride);
-            let out = row * dst_stride;
+            self.mix_rows(&src[y0 * src_stride + lo..y0 * src_stride + hi], &src[y1 * src_stride + lo..y1 * src_stride + hi], yf);
 
-            for col in 0..self.width {
-                let (x0, x1) = (self.x_idx[col] as usize * 2, self.x_next[col] as usize * 2);
+            let out = &mut dst[row * dst_stride..row * dst_stride + 2 * self.width];
+            for (col, pair) in out.chunks_exact_mut(2).enumerate() {
+                let (x0, x1) = (self.x_idx[col] as usize * 2 - lo, self.x_next[col] as usize * 2 - lo);
                 let xf = self.x_frac[col];
                 for b in 0..2 {
-                    let t = u32::from(src[r0 + x0 + b]) * (256 - xf)
-                        + u32::from(src[r0 + x1 + b]) * xf;
-                    let d = u32::from(src[r1 + x0 + b]) * (256 - xf)
-                        + u32::from(src[r1 + x1 + b]) * xf;
-                    dst[out + col * 2 + b] = ((t * (256 - yf) + d * yf) >> 16) as u8;
+                    pair[b] = Self::lerp_mixed(self.column_mix[x0 + b], self.column_mix[x1 + b], xf);
                 }
             }
         }
+    }
+
+    /// The vertical lerp of two source rows, kept at 16 bits: at most 255 * 256,
+    /// since the weights sum to 256, and not rounded, since the horizontal
+    /// lerp still has to be applied on top.
+    #[inline(always)]
+    fn mix_rows(&mut self, top: &[u8], bottom: &[u8], yf: u32) {
+        let (yf, keep) = (yf as u16, 256 - yf as u16);
+        for ((m, &a), &b) in self.column_mix.iter_mut().zip(top).zip(bottom) {
+            *m = u16::from(a) * keep + u16::from(b) * yf;
+        }
+    }
+
+    /// The horizontal lerp between two vertically mixed columns, and the one
+    /// rounding of the whole resample.
+    #[inline(always)]
+    fn lerp_mixed(a: u16, b: u16, xf: u32) -> u8 {
+        ((u32::from(a) * (256 - xf) + u32::from(b) * xf) >> 16) as u8
     }
 }
 
@@ -489,6 +561,12 @@ impl MaskUpscaler {
 }
 
 /// Blend the sharp luma plane over the blurred one, weighted by the mask.
+///
+/// In u16, because everything fits: the mask lerp is at most 255 * 256, since
+/// its weights sum to 256, and the blend at most 255 * 255, since a and
+/// 255 - a do. Half the lane width is twice the pixels per instruction, and the
+/// same bytes -- 3.4x on this machine's baseline build, where the u32 version
+/// left the compiler emulating a 32-bit multiply it has no instruction for.
 pub fn blend_luma(
     fg: &[u8],
     bg: &mut [u8],
@@ -499,11 +577,13 @@ pub fn blend_luma(
 ) {
     for row in 0..h {
         let (m0, m1, vf) = up.rows(row, h);
+        let (vf, keep) = (vf as u16, 256 - vf as u16);
         let base = row * stride;
-        for col in 0..w {
-            let a = (u32::from(m0[col]) * (256 - vf) + u32::from(m1[col]) * vf) >> 8;
-            let i = base + col;
-            bg[i] = ((u32::from(fg[i]) * a + u32::from(bg[i]) * (255 - a)) / 255) as u8;
+        let fg = &fg[base..base + w];
+        let bg = &mut bg[base..base + w];
+        for (((b, &f), &a0), &a1) in bg.iter_mut().zip(fg).zip(&m0[..w]).zip(&m1[..w]) {
+            let a = (u16::from(a0) * keep + u16::from(a1) * vf) >> 8;
+            *b = ((u16::from(f) * a + u16::from(*b) * (255 - a)) / 255) as u8;
         }
     }
 }
@@ -512,7 +592,8 @@ pub fn blend_luma(
 ///
 /// The band is built at luma width, so chroma column `c` reads band column
 /// `2 * c` -- no second upscale, and the U and V bytes of a pixel share one
-/// mask value rather than sampling it twice.
+/// mask value rather than sampling it twice. Taken as pairs of the band, the
+/// same stride as the pairs of chroma, so the compiler sees one regular walk.
 pub fn blend_chroma(
     fg: &[u8],
     bg: &mut [u8],
@@ -523,13 +604,19 @@ pub fn blend_chroma(
 ) {
     for row in 0..h {
         let (m0, m1, vf) = up.rows(row * 2, h * 2);
+        let (vf, keep) = (vf as u16, 256 - vf as u16);
         let base = row * stride;
-        for col in 0..w {
-            let c = (col * 2).min(up.width - 1);
-            let a = (u32::from(m0[c]) * (256 - vf) + u32::from(m1[c]) * vf) >> 8;
-            let i = base + col * 2;
-            bg[i] = ((u32::from(fg[i]) * a + u32::from(bg[i]) * (255 - a)) / 255) as u8;
-            bg[i + 1] = ((u32::from(fg[i + 1]) * a + u32::from(bg[i + 1]) * (255 - a)) / 255) as u8;
+        let fg = &fg[base..base + 2 * w];
+        let bg = &mut bg[base..base + 2 * w];
+        for (((b, f), a0), a1) in bg
+            .chunks_exact_mut(2)
+            .zip(fg.chunks_exact(2))
+            .zip(m0[..2 * w].chunks_exact(2))
+            .zip(m1[..2 * w].chunks_exact(2))
+        {
+            let a = (u16::from(a0[0]) * keep + u16::from(a1[0]) * vf) >> 8;
+            b[0] = ((u16::from(f[0]) * a + u16::from(b[0]) * (255 - a)) / 255) as u8;
+            b[1] = ((u16::from(f[1]) * a + u16::from(b[1]) * (255 - a)) / 255) as u8;
         }
     }
 }
@@ -832,6 +919,165 @@ mod tests {
             let mut scratch = vec![0u8; w * h];
             box_blur_uv(&mut got, &mut scratch, w, h, stride, r);
             assert_eq!(got, want, "radius {r}");
+        }
+    }
+
+    /// Deterministic noise, so a failure reproduces.
+    fn noise(seed: u32, len: usize) -> Vec<u8> {
+        let mut s = seed | 1;
+        (0..len)
+            .map(|_| {
+                s ^= s << 13;
+                s ^= s >> 17;
+                s ^= s << 5;
+                (s >> 24) as u8
+            })
+            .collect()
+    }
+
+    /// The box blur before its second round of speed-ups: a clamp on every
+    /// pixel, two walks over the sums, the average in u64. Kept to hold the
+    /// current one to the same bytes.
+    fn reference_box_blur(plane: &mut [u8], scratch: &mut [u8], w: usize, h: usize, stride: usize, r: usize) {
+        if r == 0 || w == 0 || h == 0 {
+            return;
+        }
+        let r = r.min(w - 1).min(h - 1);
+        let window = (2 * r + 1) as u64;
+        let recip = ((1u64 << 24) + window / 2) / window;
+        let avg = |sum: u32| ((u64::from(sum) * recip + (1 << 23)) >> 24) as u8;
+        for row in 0..h {
+            let src = &plane[row * stride..row * stride + w];
+            let dst = &mut scratch[row * w..(row + 1) * w];
+            let mut sum: u32 = u32::from(src[0]) * (r + 1) as u32;
+            for x in 1..=r {
+                sum += u32::from(src[x.min(w - 1)]);
+            }
+            for x in 0..w {
+                dst[x] = avg(sum);
+                sum += u32::from(src[(x + r + 1).min(w - 1)]);
+                sum -= u32::from(src[x.saturating_sub(r)]);
+            }
+        }
+        let mut sums: Vec<u32> = scratch[..w].iter().map(|&v| u32::from(v) * (r + 1) as u32).collect();
+        for y in 1..=r {
+            let row = &scratch[y.min(h - 1) * w..][..w];
+            for (s, &v) in sums.iter_mut().zip(row) {
+                *s += u32::from(v);
+            }
+        }
+        for y in 0..h {
+            let out = &mut plane[y * stride..y * stride + w];
+            for (o, &s) in out.iter_mut().zip(sums.iter()) {
+                *o = avg(s);
+            }
+            let add = &scratch[(y + r + 1).min(h - 1) * w..][..w];
+            let sub = &scratch[y.saturating_sub(r) * w..][..w];
+            for ((s, &a), &b) in sums.iter_mut().zip(add).zip(sub) {
+                *s = *s + u32::from(a) - u32::from(b);
+            }
+        }
+    }
+
+    /// The same bytes as before, on every shape the edges can take: rows
+    /// narrower than the window, a single column, padded strides, a radius past
+    /// the plane.
+    #[test]
+    fn blur_is_what_it_was() {
+        for (i, &(w, h, stride)) in [(64, 48, 70), (37, 29, 41), (7, 5, 9), (2, 2, 2), (1, 9, 1), (300, 3, 304)]
+            .iter()
+            .enumerate()
+        {
+            let plane = noise(i as u32 + 7, stride * h);
+            for r in [1, 2, 3, 6, 12, 54, 108, 5000] {
+                let (mut want, mut got) = (plane.clone(), plane.clone());
+                let mut scratch = vec![0u8; w * h];
+                reference_box_blur(&mut want, &mut scratch, w, h, stride, r);
+                box_blur(&mut got, &mut scratch, w, h, stride, r);
+                assert_eq!(got, want, "{w}x{h} stride {stride} radius {r}");
+            }
+        }
+    }
+
+    /// The four-tap bilinear the vertical-first resample replaced.
+    fn reference_resample(r: &Resampler, src: &[u8], dst: &mut [u8], stride: usize, out_stride: usize,
+                          height: usize, top: f32, span: f32, src_rows: usize, channels: usize) {
+        for row in 0..height {
+            let (y0, y1, yf) = Resampler::rows_for(row, height, top, span, src_rows);
+            let (r0, r1) = (y0 * stride, y1 * stride);
+            for col in 0..r.width {
+                let (x0, x1) = (r.x_idx[col] as usize * channels, r.x_next[col] as usize * channels);
+                let xf = r.x_frac[col];
+                for b in 0..channels {
+                    let t = u32::from(src[r0 + x0 + b]) * (256 - xf) + u32::from(src[r0 + x1 + b]) * xf;
+                    let d = u32::from(src[r1 + x0 + b]) * (256 - xf) + u32::from(src[r1 + x1 + b]) * xf;
+                    dst[row * out_stride + col * channels + b] = ((t * (256 - yf) + d * yf) >> 16) as u8;
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn resampling_is_what_it_was() {
+        let (sw, sh) = (192usize, 108usize);
+        let y = noise(3, sw * sh);
+        let uv = noise(5, sw * sh / 2);
+        for (ow, oh) in [(128usize, 72usize), (192, 108), (64, 36)] {
+            for (x, top, cw, ch) in [(0.0f32, 0.0f32, 192.0f32, 108.0f32), (10.0, 5.0, 128.0, 72.0),
+                                     (33.3, 9.1, 96.5, 54.2), (150.0, 80.0, 42.0, 28.0)] {
+                let mut r = Resampler::new(ow);
+                r.aim(x, cw, sw);
+                let (mut want, mut got) = (vec![0u8; ow * oh], vec![0u8; ow * oh]);
+                reference_resample(&r, &y, &mut want, sw, ow, oh, top, ch, sh, 1);
+                r.luma(&y, &mut got, sw, ow, oh, top, ch, sh);
+                assert_eq!(got, want, "luma {ow}x{oh} from {x},{top} {cw}x{ch}");
+
+                let mut r = Resampler::new(ow / 2);
+                r.aim(x / 2.0, cw / 2.0, sw / 2);
+                let (mut want, mut got) = (vec![0u8; ow * oh / 2], vec![0u8; ow * oh / 2]);
+                reference_resample(&r, &uv, &mut want, sw, ow, oh / 2, top / 2.0, ch / 2.0, sh / 2, 2);
+                r.chroma(&uv, &mut got, sw, ow, oh / 2, top / 2.0, ch / 2.0, sh / 2);
+                assert_eq!(got, want, "chroma {ow}x{oh} from {x},{top} {cw}x{ch}");
+            }
+        }
+    }
+
+    /// The blend in u32, as it was before the lanes were narrowed.
+    fn reference_blend(fg: &[u8], bg: &mut [u8], up: &MaskUpscaler, w: usize, h: usize, stride: usize,
+                       chroma: bool) {
+        for row in 0..h {
+            let (m0, m1, vf) = if chroma { up.rows(row * 2, h * 2) } else { up.rows(row, h) };
+            for col in 0..w {
+                let c = if chroma { col * 2 } else { col };
+                let a = (u32::from(m0[c]) * (256 - vf) + u32::from(m1[c]) * vf) >> 8;
+                for b in 0..if chroma { 2 } else { 1 } {
+                    let i = row * stride + c + b;
+                    bg[i] = ((u32::from(fg[i]) * a + u32::from(bg[i]) * (255 - a)) / 255) as u8;
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn blending_is_what_it_was() {
+        let (w, h) = (320usize, 180usize);
+        let mask: Vec<f32> = noise(9, NET * NET).iter().map(|&v| f32::from(v) / 255.0).collect();
+        for aim in [None, Some((40.0f32, 150.0f32, 30.0f32, 120.0f32))] {
+            let mut up = MaskUpscaler::new(w);
+            if let Some((a, b, c, d)) = aim {
+                up.aim(a, b, c, d);
+            }
+            up.prepare(&mask);
+            let (fg, bg) = (noise(11, w * h), noise(13, w * h));
+            let (mut want, mut got) = (bg.clone(), bg.clone());
+            reference_blend(&fg, &mut want, &up, w, h, w, false);
+            blend_luma(&fg, &mut got, &up, w, h, w);
+            assert_eq!(got, want, "luma, aimed {aim:?}");
+
+            let (mut want, mut got) = (bg[..w * h / 2].to_vec(), bg[..w * h / 2].to_vec());
+            reference_blend(&fg, &mut want, &up, w / 2, h / 2, w, true);
+            blend_chroma(&fg, &mut got, &up, w / 2, h / 2, w);
+            assert_eq!(got, want, "chroma, aimed {aim:?}");
         }
     }
 

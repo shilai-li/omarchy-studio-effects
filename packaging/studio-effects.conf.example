@@ -21,8 +21,10 @@ HEIGHT=720
 # the output, so capturing 1920x1080 for a 1280x720 output means zooming to
 # 150% costs no sharpness at all. Zero follows WIDTH/HEIGHT.
 #
-# It costs about 2 ms a frame, because the expensive stages still run at the
-# output size. Without framing there is nothing to gain, so leave it at zero.
+# It costs about 3 ms of CPU a frame with a USB camera -- one to scale the
+# picture, two more to decode a bigger one -- because the expensive stages
+# still run at the output size. Without framing there is nothing to gain, so
+# leave it at zero.
 CAPTURE_WIDTH=0
 CAPTURE_HEIGHT=0
 

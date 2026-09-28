@@ -58,6 +58,7 @@ daemon/src/framing.rs    where to crop so the subject stays centred
 daemon/src/control.rs    the unix-socket control protocol and its state
 daemon/src/bin/studio-effects.rs   the client that speaks it
 daemon/examples/preview_cost.rs    how long the preview holds up the frame loop
+daemon/examples/frame_cost.rs      each CPU stage of the frame loop, no camera needed
 packaging/               systemd units, PKGBUILD, example config
 ```
 
@@ -194,6 +195,8 @@ builds with the same capture work, or not at all.
 | 1280x720 | 0.24 | 0.72 | 2.38 | 1.94 | **5.28 ms** | 16% |
 | 1920x1080 | 0.20 | 0.85 | 4.07 | 1.94 | **7.06 ms** | 21% |
 
+Measured before the second round below; `frame_cost` gives today's figures.
+
 That is the frame loop alone, which is all the timing line times. A USB camera
 also has to be decoded, on GStreamer's capture thread, from MJPEG, on the CPU:
 3.5 ms a frame at 720p and 5.2 at 1080p, as much again as the table. It is a
@@ -237,6 +240,40 @@ scans.
 
 None of this touched the model, and neither should the next round: at 1080p the
 model is 0.85 ms of 7.06.
+
+### A second round, for the same bytes
+
+`examples/frame_cost.rs`, pinned to a P-core, the package's build flags. The
+example uses nothing the commit before it lacked, so "before" is the same
+command run there:
+
+| ms per frame | 720p, blur 12 x2 | | 1080p → 720p, blur 108 x3 | |
+|---|---|---|---|---|
+| | before | after | before | after |
+| resample | -- | -- | 1.79 | 1.12 |
+| blur | 3.41 | 2.62 | 5.30 | 4.03 |
+| blend, with prepare | 1.58 | 0.63 | 1.57 | 0.63 |
+| **CPU stages** | **5.19** | **3.44** | **8.83** | **5.94** |
+
+On an E-core the ratios are larger: 1.6x on the blur, 4x on the blend. Every
+change produces the bytes the old code did, and each has a test holding it to
+the version it replaced (`blur_is_what_it_was`, `blending_is_what_it_was`,
+`resampling_is_what_it_was`). What changed is what the compiler can do:
+
+- **The blend in u16.** Every intermediate fits in 16 bits. The package builds
+  for baseline x86-64, which has no 32-bit lane multiply, so the u32 version was
+  being emulated; 16-bit lanes are native, and twice as many per instruction.
+- **The blur's clamps only where they bite.** Keeping the window inside the row
+  was a clamp at both ends on every pixel; only the first and last `r + 1` need
+  one. The vertical pass also walked its sums twice a row, and its average is
+  u32 now, which is exact for any window under 65,793.
+- **The resample vertical first.** Bilinear is the same polynomial whichever
+  axis goes first, and neither rounds in between: mixing the two source rows as
+  one contiguous run vectorises, and leaves two loads a pixel for the
+  horizontal half instead of four.
+
+The horizontal blur pass is now most of the blur, and it is a running sum -- a
+chain of dependent adds no compiler can widen. Fewer pixels is the lever left.
 
 ### Both hot loops have reference tests
 
@@ -526,10 +563,12 @@ gives the crop real pixels: zooming to 150% is then a straight 1:1 read.
 
 The order this demands is resample **first**, composite after. Blurring at the
 capture size and scaling down afterwards would run the expensive stages on the
-bigger frame for nothing -- 26.21 ms against 12.26 for the same output. It costs
-about 2 ms, and only when it is actually doing something: an uncropped frame at
-matching sizes takes a row copy rather than a bilinear identity, which is worth
-3 ms a frame in the common case.
+bigger frame for nothing -- 26.21 ms against 12.26 for the same output. The
+resample costs about 1 ms (1.1 on a P-core, 1.7 on an E-core, 1080p to 720p),
+and only when it is actually doing something: an uncropped frame at matching
+sizes takes a row copy rather than a bilinear identity. A USB camera adds its
+own share on the capture thread, since the bigger picture has to be decoded:
+5.2 ms of MJPEG at 1080p against 3.5 at 720p.
 
 The consequence is that the mask must be read over the crop rather than the
 whole frame, which is what `MaskUpscaler::aim` is for. Get that wrong and the
@@ -722,6 +761,7 @@ a stale edge for one frame is invisible, a stutter is not.
 
 cd daemon && cargo test             # reference tests for the hot loops and the mask
 cargo run --release --example preview_cost   # the preview's cost, which the timing line cannot see
+cargo build --release --example frame_cost && taskset -c 2 target/release/examples/frame_cost 1920x1080 1280x720 108 3
 bash test/unit-args-test.sh         # the systemd unit's arguments, against the real daemon
 
 # After an OpenVINO update the daemon dies in the loader (exit 127, "cannot open

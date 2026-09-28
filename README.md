@@ -135,8 +135,9 @@ CAPTURE_HEIGHT=1080
 ```
 
 Zooming to 150% is then a straight 1:1 read with no softness at all, and it
-costs about 2 ms a frame because blur and compositing still run at the output
-size.
+costs about 3 ms of CPU a frame with a USB camera -- one to scale the picture,
+two more to decode a bigger one -- because blur and compositing still run at
+the output size.
 
 It is built to move as little as possible. You can drift a little without the
 camera reacting at all, a real move is followed slowly, and stepping out of shot
