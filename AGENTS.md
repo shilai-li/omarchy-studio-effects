@@ -47,6 +47,7 @@ models/*.onnx            model source. The IR beside it is built, not committed
 tools/convert.py         ONNX -> static FP16 IR
 tools/bench.py           per-device inference latency
 tools/load.py            per-device CPU cost at a real 30 fps cadence
+tools/cycles.py          the daemon's cycles per frame, which the clock cannot skew
 daemon/src/main.rs       CLI, GStreamer wiring, per-stage timing
 daemon/src/nv12.rs       the frame maths, and the tests that pin it
 daemon/src/mask.rs       conditioning the model's output into an alpha
@@ -187,6 +188,19 @@ the load. Making the capture thread cheaper made the frame loop *read* 40%
 slower on the same pinned cores -- prep included, which had not changed -- and
 the two builds matched again as soon as both captured at the same size. Compare
 builds with the same capture work, or not at all.
+
+Or compare them in cycles, which do not move with the clock. `tools/cycles.py`
+counts them for the daemon and every thread it starts. It is what showed how
+far CPU time understates a saving here: the rounds below halved the frame loop's
+CPU time and the process total fell only 13%, because the capture thread's
+unchanged decode read 60% dearer at the lower clock -- while in cycles the
+whole process went from 66 M a frame to 33 at this machine's config, and from
+51 M to 23 at the service default.
+
+The timing line now carries what the stages cannot: the frame rate actually
+delivered, and the whole process's CPU per frame over every thread --
+`14.9 fps, 14.20 ms of CPU a frame over every thread` beside stages summing to
+4.5 ms. The difference is the capture thread and the preview.
 
 ### What the daemon actually costs
 
@@ -818,6 +832,7 @@ a stale edge for one frame is invisible, a stutter is not.
 /usr/bin/python3 tools/convert.py   # ONNX → static FP16 IR in models/
 /usr/bin/python3 tools/bench.py     # per-device latency, re-run after model changes
 /usr/bin/python3 tools/load.py      # per-device CPU cost at a real 30 fps cadence
+taskset -c 4-7 /usr/bin/python3 tools/cycles.py 20 now -- daemon/target/release/studio-effects-daemon ...
 
 cd daemon && cargo test             # reference tests for the hot loops and the mask
 cargo run --release --example preview_cost   # the preview's cost, which the timing line cannot see

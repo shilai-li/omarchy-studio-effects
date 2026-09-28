@@ -219,7 +219,6 @@ fn parse_device(s: &str) -> Result<String, String> {
 }
 
 /// Per-stage timing, because a frame budget is the only thing that matters here.
-#[derive(Default)]
 struct Timings {
     frames: u64,
     prep: f64,
@@ -227,15 +226,48 @@ struct Timings {
     blur: f64,
     blend: f64,
     frame: f64,
+    /// When this window of frames began, and the process's CPU time then.
+    since: Instant,
+    cpu_since: Option<f64>,
 }
 
 impl Timings {
+    fn new() -> Self {
+        Self {
+            frames: 0,
+            prep: 0.0,
+            infer: 0.0,
+            blur: 0.0,
+            blend: 0.0,
+            frame: 0.0,
+            since: Instant::now(),
+            cpu_since: process_cpu_seconds(),
+        }
+    }
+
+    /// The stages, then what the stages cannot show: the frame rate the camera
+    /// is really delivering, and the CPU the whole process spent per frame.
+    ///
+    /// The stages are the frame loop alone, and they were once all anyone
+    /// read. The camera's MJPEG was being decoded on GStreamer's capture thread
+    /// at twice the size anyone asked for, a third or more of the daemon's
+    /// CPU, in no stage; and in dim light the camera drops to 8-10 fps, which
+    /// turns every "per second" figure worked out from 30 into fiction.
     fn report(&mut self, device: &str) {
         let n = self.frames as f64;
         let total = self.prep + self.infer + self.blur + self.blend + self.frame;
+        let wall = self.since.elapsed().as_secs_f64();
+        let whole = match (process_cpu_seconds(), self.cpu_since) {
+            (Some(now), Some(then)) => format!(
+                ", {:.2} ms of CPU a frame over every thread, {:.1}% of a core",
+                1e3 * (now - then) / n,
+                100.0 * (now - then) / wall
+            ),
+            _ => String::new(),
+        };
         println!(
             "{device:>3}  {:5.2} ms/frame  (prep {:4.2}  infer {:4.2}  blur {:4.2}  blend {:4.2}  frame {:4.2})  \
-             {:5.1}% of a 33 ms budget",
+             {:5.1}% of a 33 ms budget  --  {:.1} fps{whole}",
             total / n,
             self.prep / n,
             self.infer / n,
@@ -243,9 +275,31 @@ impl Timings {
             self.blend / n,
             self.frame / n,
             100.0 * (total / n) / 33.3,
+            n / wall,
         );
-        *self = Self::default();
+        *self = Self::new();
     }
+}
+
+/// CPU time this whole process has used, every thread included, in seconds.
+///
+/// `CLOCK_PROCESS_CPUTIME_ID` rather than /proc/self/stat: /proc counts in
+/// 10 ms ticks, which over a ten-frame window rounds the per-frame figure to
+/// whole milliseconds. This clock is exact to the nanosecond.
+fn process_cpu_seconds() -> Option<f64> {
+    #[repr(C)]
+    struct Timespec {
+        sec: i64,
+        nsec: i64,
+    }
+    unsafe extern "C" {
+        fn clock_gettime(clock: i32, tp: *mut Timespec) -> i32;
+    }
+    const CLOCK_PROCESS_CPUTIME_ID: i32 = 2;
+    let mut t = Timespec { sec: 0, nsec: 0 };
+    // SAFETY: clock_gettime writes one timespec through a pointer to a live one.
+    let ok = unsafe { clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &mut t) } == 0;
+    ok.then(|| t.sec as f64 + t.nsec as f64 * 1e-9)
 }
 
 /// Encode one NV12 buffer to a PNG through a throwaway pipeline.
@@ -485,7 +539,7 @@ fn main() -> Result<()> {
         // this is worth saying and not worth dying over.
         Err(e) => eprintln!("no control socket: {e:#}"),
     }
-    let mut timings = Timings::default();
+    let mut timings = Timings::new();
     let mut frame_no = 0u32;
     let mut preview: Option<preview::Preview> = None;
 
@@ -751,4 +805,27 @@ fn main() -> Result<()> {
         p.set_state(gst::State::Null)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The whole-process figure rests on this parse, and it exists for work on
+    /// other threads -- the capture thread is not the frame loop. So the work
+    /// here is done on a thread of its own while this one only waits.
+    #[test]
+    fn process_cpu_counts_other_threads() {
+        let before = process_cpu_seconds().expect("/proc/self/stat is readable");
+        std::thread::spawn(move || {
+            let deadline = Instant::now() + std::time::Duration::from_secs(5);
+            while process_cpu_seconds().unwrap_or(before) - before < 0.1 && Instant::now() < deadline {
+                std::hint::black_box((0..10_000u64).sum::<u64>());
+            }
+        })
+        .join()
+        .unwrap();
+        let spent = process_cpu_seconds().unwrap() - before;
+        assert!(spent >= 0.1, "only {spent:.3} s counted");
+    }
 }
