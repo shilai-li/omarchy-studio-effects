@@ -13,9 +13,10 @@ url="https://github.com/shilai-li/omarchy-studio-effects"
 # matting line in build() and the package really is MIT alone.
 license=('MIT' 'Apache-2.0' 'GPL-3.0')
 
-# gst-plugins-good carries v4l2src and v4l2sink; -base carries videoconvert,
-# videoscale and appsrc/appsink; -bad carries the jpeg decoding decodebin picks
-# for a USB camera.
+# gst-plugins-good carries v4l2src and v4l2sink, jpegdec for a USB camera's
+# MJPEG and jpegenc for the preview, aspectratiocrop and pngenc; -base, through
+# -base-libs, carries decodebin, videoconvert, videoscale and appsrc/appsink.
+# Nothing comes from -bad, whatever this once said about the jpeg decoding.
 depends=('openvino' 'gstreamer' 'gst-plugins-base' 'gst-plugins-good'
          'v4l2loopback-dkms' 'v4l2loopback-utils'
          # Voice Focus: the RNNoise LADSPA plugin, run inside a PipeWire
