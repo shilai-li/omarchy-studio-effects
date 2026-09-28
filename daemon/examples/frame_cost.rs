@@ -97,13 +97,19 @@ fn main() {
         y.copy_from_slice(&sharp_y);
         uv.copy_from_slice(&sharp_uv);
     });
-    let blur = time(|| {
+    let full_size = time(|| {
         y.copy_from_slice(&sharp_y);
         uv.copy_from_slice(&sharp_uv);
         for _ in 0..passes {
             nv12::box_blur(&mut y, &mut scratch, w, h, w, radius);
             nv12::box_blur_uv(&mut uv, &mut scratch, w, h / 2, w, radius / 2);
         }
+    }) - copy;
+    let mut blurrer = nv12::Blur::new(w, h);
+    let blur = time(|| {
+        y.copy_from_slice(&sharp_y);
+        uv.copy_from_slice(&sharp_uv);
+        blurrer.apply(&mut y, &mut uv, w, h, w, w, radius, passes);
     }) - copy;
 
     let mask: Vec<f32> = (0..NET * NET)
@@ -112,6 +118,7 @@ fn main() {
             (1.5 - (x * x / 0.03 + yy * yy / 0.08)).clamp(0.0, 1.0)
         })
         .collect();
+    // The blend's cost does not depend on what it blends over.
     let blurred = (y.clone(), uv.clone());
     let mut up = MaskUpscaler::new(w);
     let blend = time(|| {
@@ -125,7 +132,10 @@ fn main() {
     println!("capture {cw}x{ch}, output {w}x{h}, blur {radius} x{passes}");
     println!("  prep   {prep:6.3} ms");
     println!("  frame  {frame_stage:6.3} ms  ({})", if scaling { "resample" } else { "copy" });
-    println!("  blur   {blur:6.3} ms");
+    println!(
+        "  blur   {blur:6.3} ms  (at 1/{} size; {full_size:.3} ms at full size)",
+        nv12::Blur::factor(w, h, radius)
+    );
     println!("  blend  {blend:6.3} ms  (prepare included)");
     println!("  total  {:6.3} ms", prep + frame_stage + blur + blend);
 }

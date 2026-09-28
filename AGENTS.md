@@ -171,7 +171,9 @@ that halves everything on the CPU. It is also why 720p is the default -- on
 battery, which is when a laptop is on a call, 1080p leaves little headroom and
 1080p with framing has none (96%).
 
-Re-measure on battery before believing any budget claim in this file.
+Re-measure on battery before believing any budget claim in this file. The table
+above predates both rounds of blur work below; the 20 ms it shows is the thing
+they were aimed at, and has not been measured on battery since.
 
 ### Count the frames; the camera may not be doing 30
 
@@ -275,6 +277,31 @@ the version it replaced (`blur_is_what_it_was`, `blending_is_what_it_was`,
 The horizontal blur pass is now most of the blur, and it is a running sum -- a
 chain of dependent adds no compiler can widen. Fewer pixels is the lever left.
 
+### Fewer pixels: the blur at half or quarter size
+
+A box blur costs the same at any radius, so a wide blur at full size is paying
+to compute detail it then averages away. `nv12::Blur` shrinks the frame by 2x2
+averages, blurs that, and stretches it back with a fixed 3:1 lerp -- at half
+size from radius 10, quarter from 48, full size below. Same example, same core:
+
+| ms per frame | blur, full size | blur, as run | CPU stages |
+|---|---|---|---|
+| 720p, blur 12 x2 (half) | 2.60 | 0.95 | 1.77 |
+| 1080p → 720p, blur 108 x3 (quarter) | 4.02 | 0.64 | 2.57 |
+| 1080p, blur 12 x2 (half) | 5.78 | 2.16 | 3.64 |
+
+Against the full-size blur, on a photograph and on a synthetic 720p room, every
+pixel stays within 4 levels at 49 dB PSNR or better, and
+`reduced_blur_stays_close_to_full_size` holds that. The thresholds are where
+that stops being true: half size at radius 8 reached 5 levels in chroma, and
+quarter size at radius 12 reached 9, because the shrink and the stretch add a
+little softening of their own that only a wide blur hides. A flat colour comes
+back exactly -- `(4v + 2) >> 2` and `(16v + 8) >> 4` are both `v` -- so this
+cannot bring back the 199-for-200 darkening below.
+
+Only factors both planes divide into exactly are used, so the stretch lands on
+every row and column; anything else keeps the full-size blur.
+
 ### Both hot loops have reference tests
 
 `cargo test` checks the fast paths against slow obvious ones -- a float bilinear
@@ -312,12 +339,17 @@ needle once LLVM has seen them:
   reciprocal is 5% at the compiler's default CPU, and changes mid-alpha by a
   level.
 - Reusing `box_blur`'s per-call `Vec<u32>` column sums is ~1%.
-- Blurring at half resolution then upscaling is not cheaper: the scale costs
-  what the smaller box saves.
+- Blurring at half resolution was measured here once as not cheaper, "the scale
+  costs what the smaller box saves". That was with the general crop-anywhere
+  resampler doing both scalings. With fixed factors it is 2.7x cheaper at the
+  default radius -- see "Fewer pixels" above. The scaling has to be cheap, not
+  absent.
 
-The next real win is still a GPU composite, for the reason already stated:
-sampling is free there. Until then, 720p stays the default because battery
-blur -- 20 ms of a 26 ms frame -- is a CPU walk, not a model.
+After both rounds the frame loop's CPU stages are under 2 ms at the default and
+2.6 at this machine's 1080p-capture config, and the largest CPU cost left is
+not in the frame loop at all: it is the capture thread decoding the camera's
+MJPEG, 3.5 ms a frame at 720p. A GPU composite would still make sampling free,
+but it now saves about 2 ms rather than 10.
 
 ## Invariants
 

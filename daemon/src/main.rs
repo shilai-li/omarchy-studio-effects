@@ -402,7 +402,7 @@ fn main() -> Result<()> {
     // place.
     let mut sharp_y = vec![0u8; out_y_stride * h];
     let mut sharp_uv = vec![0u8; out_uv_stride * h.div_ceil(2)];
-    let mut scratch = vec![0u8; w * h];
+    let mut blur = nv12::Blur::new(w, h);
     let mut upscaler = nv12::MaskUpscaler::new(w);
     let mut mask_filter = mask::MaskFilter::new(args.mask_gain, args.mask_smoothing);
     let mut mask = vec![0.0f32; nv12::NET * nv12::NET];
@@ -678,14 +678,9 @@ fn main() -> Result<()> {
                 Effect::Blur => {
                     // Repeated box blur converges on a Gaussian. Two passes is
                     // the point where the boxiness stops being visible against
-                    // a hard edge, which is why it is the default.
-                    //
-                    // Chroma is half the resolution, so half the radius --
-                    // and two channels, which box_blur must never be given.
-                    for _ in 0..passes {
-                        nv12::box_blur(y_out, &mut scratch, w, h, out_y_stride, blur_radius);
-                        nv12::box_blur_uv(uv_out, &mut scratch, w, h / 2, out_uv_stride, blur_radius / 2);
-                    }
+                    // a hard edge, which is why it is the default. At half or
+                    // quarter size when the radius allows -- see nv12::Blur.
+                    blur.apply(y_out, uv_out, w, h, out_y_stride, out_uv_stride, blur_radius, passes);
                 }
                 Effect::None => {}
             }

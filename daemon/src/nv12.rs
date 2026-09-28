@@ -231,6 +231,166 @@ fn blur_columns(
     }
 }
 
+/// The background blur for a whole frame, done at a fraction of its size when
+/// the radius is wide enough that nothing shows.
+///
+/// A box blur costs the same at any radius, so the only way to make it cheaper
+/// is fewer pixels: shrink the frame by averaging 2x2 blocks, blur that, and
+/// stretch it back with a fixed 3:1 lerp. Against the full-size blur, on a
+/// photograph and on a synthetic room at 720p, half size from radius 10 and
+/// quarter size from radius 48 keep every pixel within 4 levels, at 49 dB PSNR
+/// or better -- invisible in a blurred background, and
+/// `reduced_blur_stays_close_to_full_size` holds it there. Below those radii
+/// the softening the shrink and the stretch add starts to count (half size at
+/// radius 8 reached 5 levels in chroma, quarter size at radius 12 reached 9),
+/// so those keep the full frame.
+///
+/// This was once measured as not cheaper, with the general crop-anywhere
+/// resampler doing both scalings. It is the scaling that has to be cheap, and
+/// fixed factors are: radius 12 costs 2.6x less at half size, and radius 108 6x
+/// less at quarter.
+pub struct Blur {
+    half: Vec<u8>,
+    quarter: Vec<u8>,
+    scratch: Vec<u8>,
+    stretch: Vec<u16>,
+}
+
+impl Blur {
+    pub fn new(w: usize, h: usize) -> Self {
+        Self {
+            half: vec![0; w * h / 4],
+            quarter: vec![0; w * h / 16],
+            scratch: vec![0; w * h],
+            stretch: Vec::new(),
+        }
+    }
+
+    /// How far to shrink a `w` x `h` frame for luma radius `r`: 1, 2 or 4.
+    ///
+    /// Only by factors both planes divide into exactly -- chroma is half the
+    /// size again -- so the stretch lands back on every row and column.
+    pub fn factor(w: usize, h: usize, r: usize) -> usize {
+        let fits = |f: usize| w >= 2 * f && h >= 2 * f && w % (2 * f) == 0 && h % (2 * f) == 0;
+        if r >= 48 && fits(4) {
+            4
+        } else if r >= 10 && fits(2) {
+            2
+        } else {
+            1
+        }
+    }
+
+    /// Blur both planes in place, `passes` times, luma at radius `r`.
+    ///
+    /// Chroma is half the resolution, so half the radius -- and two channels,
+    /// which `box_blur` must never be given.
+    pub fn apply(
+        &mut self,
+        y: &mut [u8],
+        uv: &mut [u8],
+        w: usize,
+        h: usize,
+        y_stride: usize,
+        uv_stride: usize,
+        r: usize,
+        passes: usize,
+    ) {
+        let f = Self::factor(w, h, r);
+        self.plane::<1>(y, w, h, y_stride, r, passes, f);
+        self.plane::<2>(uv, w / 2, h / 2, uv_stride, r / 2, passes, f);
+    }
+
+    /// One plane of `C` channels, `w` samples wide, radius `r` in its samples.
+    fn plane<const C: usize>(&mut self, p: &mut [u8], w: usize, h: usize, stride: usize, r: usize, passes: usize, f: usize) {
+        let blur = |q: &mut [u8], scratch: &mut [u8], w: usize, h: usize, stride: usize, r: usize| {
+            for _ in 0..passes {
+                if C == 1 {
+                    box_blur(q, scratch, w, h, stride, r);
+                } else {
+                    box_blur_uv(q, scratch, 2 * w, h, stride, r);
+                }
+            }
+        };
+        match f {
+            4 => {
+                let (w1, h1) = halve::<C>(p, w, h, stride, &mut self.half);
+                let (w2, h2) = halve::<C>(&self.half, w1, h1, w1 * C, &mut self.quarter);
+                blur(&mut self.quarter, &mut self.scratch, w2, h2, w2 * C, r / 4);
+                double::<C>(&self.quarter, w2, h2, &mut self.half, w1 * C, &mut self.stretch);
+                double::<C>(&self.half, w1, h1, p, stride, &mut self.stretch);
+            }
+            2 => {
+                let (w1, h1) = halve::<C>(p, w, h, stride, &mut self.half);
+                blur(&mut self.half, &mut self.scratch, w1, h1, w1 * C, r / 2);
+                double::<C>(&self.half, w1, h1, p, stride, &mut self.stretch);
+            }
+            _ => blur(p, &mut self.scratch, w, h, stride, r),
+        }
+    }
+}
+
+/// Halve a plane of `C` interleaved channels, `w` samples wide, into `dst`
+/// packed: each sample the rounded mean of a 2x2 block. A flat plane stays
+/// exactly flat, (4v + 2) >> 2 being v.
+fn halve<const C: usize>(src: &[u8], w: usize, h: usize, stride: usize, dst: &mut [u8]) -> (usize, usize) {
+    let (ow, oh) = (w / 2, h / 2);
+    for y in 0..oh {
+        let top = &src[2 * y * stride..][..2 * ow * C];
+        let bottom = &src[(2 * y + 1) * stride..][..2 * ow * C];
+        let out = &mut dst[y * ow * C..][..ow * C];
+        for ((o, a), b) in out.chunks_exact_mut(C).zip(top.chunks_exact(2 * C)).zip(bottom.chunks_exact(2 * C)) {
+            for c in 0..C {
+                let sum = u16::from(a[c]) + u16::from(a[C + c]) + u16::from(b[c]) + u16::from(b[C + c]);
+                o[c] = ((sum + 2) >> 2) as u8;
+            }
+        }
+    }
+    (ow, oh)
+}
+
+/// Double a packed plane back up into `dst`, bilinearly, sample centres
+/// aligned: output sample 2x sits a quarter of a sample left of x, and 2x + 1 a
+/// quarter right, so every output is a 3:1 mix of two inputs on each axis. The
+/// edges repeat. A flat plane stays exactly flat.
+fn double<const C: usize>(lo: &[u8], ow: usize, oh: usize, dst: &mut [u8], stride: usize, mix: &mut Vec<u16>) {
+    let lw = ow * C;
+    mix.resize(lw, 0);
+    for y in 0..oh * 2 {
+        // Vertical 3:1, kept at 4x scale for the horizontal one to finish.
+        let near = y / 2;
+        let far = if y % 2 == 0 { near.saturating_sub(1) } else { (near + 1).min(oh - 1) };
+        for ((m, &a), &b) in mix.iter_mut().zip(&lo[near * lw..][..lw]).zip(&lo[far * lw..][..lw]) {
+            *m = 3 * u16::from(a) + u16::from(b);
+        }
+        let out = &mut dst[y * stride..][..2 * lw];
+        for x in [0, ow - 1] {
+            let (left, right) = (x.saturating_sub(1), (x + 1).min(ow - 1));
+            for c in 0..C {
+                let centre = 3 * mix[x * C + c];
+                out[2 * x * C + c] = ((centre + mix[left * C + c] + 8) >> 4) as u8;
+                out[(2 * x + 1) * C + c] = ((centre + mix[right * C + c] + 8) >> 4) as u8;
+            }
+        }
+        if ow > 2 {
+            let inner = &mut out[2 * C..2 * (ow - 1) * C];
+            let (left, centre, right) = (&mix[..(ow - 2) * C], &mix[C..(ow - 1) * C], &mix[2 * C..]);
+            for (((o, l), m), r) in inner
+                .chunks_exact_mut(2 * C)
+                .zip(left.chunks_exact(C))
+                .zip(centre.chunks_exact(C))
+                .zip(right.chunks_exact(C))
+            {
+                for c in 0..C {
+                    let centre = 3 * m[c];
+                    o[c] = ((centre + l[c] + 8) >> 4) as u8;
+                    o[C + c] = ((centre + r[c] + 8) >> 4) as u8;
+                }
+            }
+        }
+    }
+}
+
 /// Where the subject is, in mask coordinates, as (left, top, right, bottom).
 ///
 /// Taken from the segmentation mask rather than a face detector: the mask is
@@ -1079,6 +1239,93 @@ mod tests {
             blend_chroma(&fg, &mut got, &up, w / 2, h / 2, w);
             assert_eq!(got, want, "chroma, aimed {aim:?}");
         }
+    }
+
+    /// A frame with something in it for a blur to get wrong: gradients, hard
+    /// edges, noise, and chroma that is actually coloured.
+    fn room(w: usize, h: usize) -> (Vec<u8>, Vec<u8>) {
+        let n = noise(17, w * h);
+        let mut y = vec![0u8; w * h];
+        for row in 0..h {
+            for col in 0..w {
+                let edge = if (col / 47 + row / 31) % 3 == 0 { 40 } else { 0 };
+                let v = (col * 180 / w + row * 60 / h) as i32 + edge + i32::from(n[row * w + col] % 9) - 4;
+                y[row * w + col] = v.clamp(16, 235) as u8;
+            }
+        }
+        let mut uv = vec![0u8; w * h / 2];
+        for (i, pair) in uv.chunks_exact_mut(2).enumerate() {
+            let (u, v) = [(90, 240), (200, 90), (60, 60), (128, 128)][(i % (w / 2)) * 4 / (w / 2)];
+            let jitter = i32::from(n[i] % 5) - 2;
+            pair[0] = (u + jitter) as u8;
+            pair[1] = (v + jitter) as u8;
+        }
+        (y, uv)
+    }
+
+    /// Worst difference in levels, and PSNR in dB.
+    fn difference(a: &[u8], b: &[u8]) -> (u8, f64) {
+        let worst = a.iter().zip(b).map(|(x, y)| x.abs_diff(*y)).max().unwrap_or(0);
+        let mse = a.iter().zip(b).map(|(x, y)| f64::from(x.abs_diff(*y)).powi(2)).sum::<f64>() / a.len() as f64;
+        (worst, if mse == 0.0 { f64::INFINITY } else { 10.0 * (255.0 * 255.0 / mse).log10() })
+    }
+
+    /// Shrinking and stretching must not move a flat colour by a level. A bias
+    /// here would be the 199-for-200 darkening again, on every background.
+    #[test]
+    fn reduced_blur_of_a_flat_colour_is_that_colour() {
+        let (w, h) = (640, 360);
+        for r in [12, 108] {
+            let mut y = vec![200u8; w * h];
+            let mut uv: Vec<u8> = [90u8, 240].repeat(w * h / 4);
+            Blur::new(w, h).apply(&mut y, &mut uv, w, h, w, w, r, 2);
+            assert!(y.iter().all(|&v| v == 200), "luma moved at radius {r}");
+            assert!(uv.chunks_exact(2).all(|p| p == [90, 240]), "chroma moved at radius {r}");
+        }
+    }
+
+    /// Where it shrinks, the result must stay indistinguishable from the
+    /// full-size blur: a few levels at worst, in a picture that is blurred.
+    #[test]
+    fn reduced_blur_stays_close_to_full_size() {
+        let (w, h) = (1280, 720);
+        let (y0, uv0) = room(w, h);
+        for (r, factor) in [(10, 2), (12, 2), (47, 2), (48, 4), (108, 4)] {
+            assert_eq!(Blur::factor(w, h, r), factor, "factor for radius {r}");
+            let (mut full_y, mut full_uv) = (y0.clone(), uv0.clone());
+            let mut scratch = vec![0u8; w * h];
+            for _ in 0..2 {
+                box_blur(&mut full_y, &mut scratch, w, h, w, r);
+                box_blur_uv(&mut full_uv, &mut scratch, w, h / 2, w, r / 2);
+            }
+            let (mut y, mut uv) = (y0.clone(), uv0.clone());
+            Blur::new(w, h).apply(&mut y, &mut uv, w, h, w, w, r, 2);
+            let (worst_y, psnr_y) = difference(&y, &full_y);
+            let (worst_uv, psnr_uv) = difference(&uv, &full_uv);
+            assert!(worst_y <= 4 && psnr_y >= 49.0, "radius {r}: luma {worst_y} levels, {psnr_y:.1} dB");
+            assert!(worst_uv <= 4 && psnr_uv >= 49.0, "radius {r}: chroma {worst_uv} levels, {psnr_uv:.1} dB");
+        }
+    }
+
+    /// Below the thresholds, or on a frame the factor does not divide, the blur
+    /// is the full-size one exactly.
+    #[test]
+    fn reduced_blur_falls_back_to_full_size() {
+        assert_eq!(Blur::factor(1280, 720, 9), 1);
+        assert_eq!(Blur::factor(1280, 720, 108), 4);
+        assert_eq!(Blur::factor(1282, 720, 108), 1, "1282 does not halve into even chroma");
+        assert_eq!(Blur::factor(1284, 720, 108), 2, "1284 halves, but not twice");
+        let (w, h) = (322, 180);
+        let (y0, uv0) = room(w, h);
+        let (mut want_y, mut want_uv) = (y0.clone(), uv0.clone());
+        let mut scratch = vec![0u8; w * h];
+        for _ in 0..2 {
+            box_blur(&mut want_y, &mut scratch, w, h, w, 20);
+            box_blur_uv(&mut want_uv, &mut scratch, w, h / 2, w, 10);
+        }
+        let (mut y, mut uv) = (y0.clone(), uv0.clone());
+        Blur::new(w, h).apply(&mut y, &mut uv, w, h, w, w, 20, 2);
+        assert_eq!((y, uv), (want_y, want_uv));
     }
 
     /// The fast blur must match a naive box blur with the same edge clamping.
