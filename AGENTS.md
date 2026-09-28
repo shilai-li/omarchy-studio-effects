@@ -171,6 +171,19 @@ battery, which is when a laptop is on a call, 1080p leaves little headroom and
 
 Re-measure on battery before believing any budget claim in this file.
 
+### Count the frames; the camera may not be doing 30
+
+In dim light this USB camera lengthens its exposure (`exposure_dynamic_framerate`
+is on) and delivers 8-10 fps. A per-frame figure worked out from an assumed 30
+is then wrong by that factor, and a percentage of a core is a third of what the
+same work costs at 30. Count them: `--stats-every 10` prints a line per ten.
+
+A slow camera also leaves the cores idle between frames, and the clock follows
+the load. Making the capture thread cheaper made the frame loop *read* 40%
+slower on the same pinned cores -- prep included, which had not changed -- and
+the two builds matched again as soon as both captured at the same size. Compare
+builds with the same capture work, or not at all.
+
 ### What the daemon actually costs
 
 `studio-effects-daemon`, per frame, USB camera, NPU, blur radius 12:
@@ -179,6 +192,11 @@ Re-measure on battery before believing any budget claim in this file.
 |---|---|---|---|---|---|---|
 | 1280x720 | 0.24 | 0.72 | 2.38 | 1.94 | **5.28 ms** | 16% |
 | 1920x1080 | 0.20 | 0.85 | 4.07 | 1.94 | **7.06 ms** | 21% |
+
+That is the frame loop alone, which is all the timing line times. A USB camera
+also has to be decoded, on GStreamer's capture thread, from MJPEG, on the CPU:
+3.5 ms a frame at 720p and 5.2 at 1080p, as much again as the table. It is a
+budget for latency, not for CPU -- see "Ask the camera for the size you want".
 
 1080p30 fits with room to spare. It did not at first -- the first working
 version landed on 33.28 ms, exactly the budget -- and the 4.7x that closed the
@@ -608,6 +626,34 @@ whatever you just changed broke the pipeline. `systemctl --user stop
 studio-effects` before testing by hand. This costs at least one debugging
 session per person who forgets, so it is worth suspecting early: startup lines
 present, no timing lines, no error.
+
+**Ask the camera for the size you want, ahead of decodebin.** `decodebin`
+accepts anything, so `v4l2src` behind it never learns what size is wanted
+downstream and opens the camera's largest mode. The 720p default spent its life
+decoding 1080p MJPEG and scaling it down: 6.35 ms of CPU a frame, where asking
+for 720p costs 3.52. Nothing showed it, because the decode runs on GStreamer's
+capture thread and the timing line times only the frame loop -- a third of the
+daemon's CPU, and in no number in this file.
+
+The capture caps now list the size first, raw before MJPEG because raw needs no
+decode, then anything, so a camera without that size still opens: asked for
+1024x576, this one gives its nearest mode, 960x540, and `videoscale` makes up
+the difference. The daemon says what it got, once, on the first frame --
+`camera delivers image/jpeg 1280x720 at 30/1 fps` -- and that line is the one to
+read before believing a capture setting did what it says. Measured over counted
+frames, with a capture-only run subtracted:
+
+```bash
+time gst-launch-1.0 -q v4l2src device=/dev/video0 num-buffers=90 \
+  ! decodebin ! videoconvert ! videoscale \
+  ! video/x-raw,format=NV12,width=1280,height=720,framerate=30/1 ! fakesink sync=false
+# and again with the preference ahead of decodebin:
+#   v4l2src ... ! 'image/jpeg,width=1280,height=720,framerate=30/1;image/jpeg;video/x-raw' ! decodebin ...
+```
+
+Hardware MJPEG decode is not the next step. Through VA-API, via ffmpeg because
+GStreamer's `va` plugin is a separate package, it cost more than twice the CPU
+of `jpegdec`: downloading the decoded surface to system memory dominates.
 
 **The model's output is a probability, not an alpha.** Using it directly is what
 made a waving hand look transparent: the camera motion-blurs it, the model is

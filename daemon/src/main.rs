@@ -307,8 +307,23 @@ fn main() -> Result<()> {
     let cap_w = if args.capture_width == 0 { args.width } else { args.capture_width };
     let cap_h = if args.capture_height == 0 { args.height } else { args.capture_height };
 
+    // What the camera is asked for, ahead of decodebin. decodebin accepts
+    // anything, so without this v4l2src never learns what size is wanted
+    // downstream and opens the camera's largest mode: the 720p default was
+    // decoding 1080p MJPEG and scaling it down on every frame, 6.35 ms of CPU
+    // where asking for 720p costs 3.52 -- on the capture thread, where the
+    // timing line never sees it.
+    //
+    // Raw first, because raw needs no decode; then MJPEG at the same size;
+    // then anything, so a camera without this size still opens and videoscale
+    // makes up the difference, as it always did.
+    let wanted = format!(
+        "video/x-raw,width={cap_w},height={cap_h},framerate={fps}/1;\
+         image/jpeg,width={cap_w},height={cap_h},framerate={fps}/1;image/jpeg;video/x-raw",
+        fps = args.fps
+    );
     let src = format!(
-        "v4l2src device={} ! decodebin ! videoconvert ! videoscale \
+        "v4l2src name=camera device={} ! {wanted} ! decodebin ! videoconvert ! videoscale \
          ! video/x-raw,format=NV12,width={},height={},framerate={}/1 \
          ! appsink name=sink max-buffers=2 drop=true sync=false",
         input, cap_w, cap_h, args.fps
@@ -490,6 +505,9 @@ fn main() -> Result<()> {
     // cleans it up on an orderly exit; this covers the rest.
     let _ = std::fs::remove_file(preview::Preview::path_for_runtime());
 
+    let camera = pipeline.by_name("camera");
+    let mut announced = false;
+
     loop {
         let sample = match sink.pull_sample() {
             Ok(s) => s,
@@ -501,6 +519,24 @@ fn main() -> Result<()> {
             Err(_) if sink.is_eos() => break,
             Err(e) => anyhow::bail!("the camera stopped delivering frames: {e}"),
         };
+
+        // Said once, on the first frame, because what the camera agreed to is
+        // the one fact no setting shows. The 720p default spent its whole life
+        // decoding 1080p, and this line would have said so.
+        if !announced {
+            announced = true;
+            let caps = camera.as_ref().and_then(|c| c.static_pad("src")).and_then(|p| p.current_caps());
+            if let Some(s) = caps.as_ref().and_then(|c| c.structure(0)) {
+                let rate = s.get::<gst::Fraction>("framerate").ok();
+                println!(
+                    "camera delivers {} {}x{} at {} fps",
+                    s.name(),
+                    s.get::<i32>("width").unwrap_or(0),
+                    s.get::<i32>("height").unwrap_or(0),
+                    rate.map_or("?".into(), |r| format!("{}/{}", r.numer(), r.denom())),
+                );
+            }
+        }
         let info = gst_video::VideoInfo::from_caps(sample.caps().context("sample had no caps")?)?;
         let src_buf = sample.buffer().context("sample had no buffer")?;
 
