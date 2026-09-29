@@ -60,6 +60,7 @@ daemon/src/control.rs    the unix-socket control protocol and its state
 daemon/src/bin/studio-effects.rs   the client that speaks it
 daemon/examples/preview_cost.rs    how long the preview holds up the frame loop
 daemon/examples/frame_cost.rs      each CPU stage of the frame loop, no camera needed
+daemon/examples/devices.rs         every model on every device this machine has, compared
 packaging/               systemd units, PKGBUILD, example config
 ```
 
@@ -447,6 +448,29 @@ think, because the driver's udev rule puts `/dev/accel/*` in group `render` and
 a user is not in `render` by default. The failure is silent: OpenVINO reports
 `available_devices` without `NPU` rather than raising a permission error, so the
 daemon must say "no NPU, using GPU" out loud instead of quietly degrading.
+
+Being listed is not being usable, so the chain is walked, not just consulted:
+`Segmenter::new` tries each device in turn and moves on when one refuses the
+model, saying why. A device asked for by name (`--device NPU`) is the only
+candidate, so a benchmark cannot quietly measure another one.
+
+**A compiler that aborts cannot be caught, so it leaves a note first.** Handing
+the NPU a model with a dynamic shape does not return an error: its compiler dies
+with `LLVM ERROR: Failed to infer result type(s)` and takes the process with it,
+exit 134. The shipped models are static and do not do this, but an older driver
+might, and under systemd that is a restart loop with the camera gone. So
+compiling writes `compiling-<DEVICE>` beside the saved settings and removes it
+afterwards; one still there at the next start means that device did not come
+back, and it is skipped -- once, and never when it is the last candidate. The
+start after tries it again, so a driver that has since been fixed is not written
+off. Reproduce it with the raw `models/selfie_segmentation.onnx`: the first
+start aborts, the second runs on the GPU, the third aborts again.
+
+`examples/devices.rs` runs both models on every device and compares each mask
+against the CPU's on the same frame -- give it a real one, since a synthetic
+scene has nobody in it and every mask is zero. On this machine the NPU and GPU
+differ from the CPU by at most 0.026 in any pixel and 0.0001 on average, so a
+machine without an NPU gets the same picture, not merely a picture.
 
 **NPU access is a permissions question, not a group question.** An earlier note
 here said the shipped unit should set `SupplementaryGroups=render`. That was
@@ -836,6 +860,7 @@ taskset -c 4-7 /usr/bin/python3 tools/cycles.py 20 now -- daemon/target/release/
 
 cd daemon && cargo test             # reference tests for the hot loops and the mask
 cargo run --release --example preview_cost   # the preview's cost, which the timing line cannot see
+cargo run --release --example devices        # every model on every device; add `-- frame.nv12 1280x720` for a real scene
 cargo build --release --example frame_cost && taskset -c 2 target/release/examples/frame_cost 1920x1080 1280x720 108 3
 bash test/unit-args-test.sh         # the systemd unit's arguments, against the real daemon
 
