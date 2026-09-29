@@ -329,6 +329,19 @@ mod tests {
         assert_eq!(pick(&camera, 1920, 1080, 60), Some(jpeg(640, 480, 30)));
     }
 
+    /// A second real camera, read off another laptop (TM1709, a 2017 i5 with no
+    /// NPU): a XiaoMi USB webcam that tops out at 720p, whose uncompressed 720p
+    /// is 10 fps and whose small modes are 30. It is asked for 1080p by default
+    /// and must come back with 720p MJPEG at 30, not a slow bigger mode or a
+    /// tiny fast one.
+    #[test]
+    fn a_720p_webcam_from_another_laptop_gets_720p30() {
+        let mut modes = vec![jpeg(1280, 720, 30), jpeg(640, 480, 30), jpeg(320, 240, 30), jpeg(160, 120, 30)];
+        modes.extend([raw(1280, 720, 10), raw(640, 480, 30), raw(320, 240, 30), raw(160, 120, 30)]);
+        assert_eq!(pick(&modes, 1920, 1080, 60), Some(jpeg(1280, 720, 30)));
+        assert_eq!(pick(&modes, 640, 480, 60), Some(raw(640, 480, 30)), "4:3 when 4:3 is asked for");
+    }
+
     #[test]
     fn a_camera_with_no_usable_modes_yields_nothing() {
         assert_eq!(pick(&[], 1920, 1080, 60), None);
