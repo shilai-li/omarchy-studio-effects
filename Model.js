@@ -75,6 +75,64 @@ function parseVoiceState(text) {
     return "off";
 }
 
+// ---- Whether the daemon is installed at all.
+//
+// `omarchy plugin add` clones files and nothing else: no build, no install hook,
+// no sudo. So right after adding this plugin there is no daemon, and "not
+// running" is the wrong thing to say about it -- the fix is different (build one
+// rather than start one), and a panel that only says nothing is running leaves
+// somebody to work that out from the README.
+var DAEMON = "/usr/bin/studio-effects-daemon";
+var TEST = "/usr/bin/test";
+
+function installedCommand() { return [TEST, "-x", DAEMON]; }
+
+// `test` exits 0 for yes and 1 for no. Anything else -- it could not be run, it
+// was killed -- says nothing about the daemon, and calling that "not installed"
+// would offer to reinstall something that is there.
+function parseInstalled(exitCode) {
+    if (exitCode === 0) return "yes";
+    if (exitCode === 1) return "no";
+    return "unknown";
+}
+
+// What opens the setup script in a terminal the person can see. The widget never
+// builds or installs anything itself: it runs in the shell process with the
+// shell's privileges, and a sudo prompt has to be answered somewhere a person is
+// looking. So it hands off to a terminal, the way a bar widget for ssh does.
+//
+// The script's path arrives as an argument, never as part of the script text,
+// and the launchers are found on a fixed PATH rather than the inherited one.
+// Omarchy's own floating terminal is preferred, because it is what every other
+// setup step on this desktop looks like; the default terminal is the fallback.
+//
+// The Omarchy launcher joins its arguments into one string that a shell then
+// parses, so the command is quoted with %q first. A path with a space in it
+// would otherwise run as two commands.
+var SHELL = "/usr/bin/bash";
+var LAUNCH_SCRIPT =
+    'trusted() { PATH=/usr/share/omarchy/bin:/usr/bin:/bin command -v -- "$1"; }\n'
+    + 'script=$1\n'
+    + '[ -f "$script" ] || exit 1\n'
+    + 'presenter=$(trusted omarchy-launch-floating-terminal-with-presentation) || presenter=""\n'
+    + 'if [ -n "$presenter" ]; then\n'
+    + '  exec "$presenter" "$(printf \'%q \' /usr/bin/bash "$script")"\n'
+    + 'fi\n'
+    + 'term=$(trusted xdg-terminal-exec) || exit 1\n'
+    + 'session=$(trusted setsid) || session=""\n'
+    + 'if [ -n "$session" ]; then exec "$session" "$term" /usr/bin/bash "$script"; fi\n'
+    + 'exec "$term" /usr/bin/bash "$script"';
+
+function setupLaunch(scriptPath) {
+    if (typeof scriptPath !== "string" || scriptPath.length === 0 || scriptPath.charAt(0) !== "/")
+        return null;
+    return [SHELL, "-c", LAUNCH_SCRIPT, "studio-effects-setup", scriptPath];
+}
+
+// How often to re-check while setup is running in the terminal. It finishes
+// when the package lands, which nothing here is told about.
+var SETUP_POLL_MS = 3000;
+
 // The daemon needs a moment to open the camera after systemd reports the unit
 // started, so the widget re-asks rather than concluding from one silent reply
 // that starting failed.
@@ -411,7 +469,8 @@ function labelFor(state) {
 // The tooltip carries what the glyph no longer does, and it has to cover both
 // halves: with a single icon, a user whose camera is off but whose microphone
 // filter is on has no other way to tell why the widget looks active.
-function tooltipFor(state, voice) {
+function tooltipFor(state, voice, installed) {
+    if (installed === "no") return "Studio Effects — not installed yet, open the panel to set it up";
     var parts = [];
     if (state && state.running) {
         var where = state.device ? " on " + state.device : "";
@@ -463,6 +522,14 @@ if (typeof module !== "undefined" && module.exports) {
         SYSTEMCTL: SYSTEMCTL,
         UNIT: UNIT,
         VOICE_UNIT: VOICE_UNIT,
+        DAEMON: DAEMON,
+        TEST: TEST,
+        SHELL: SHELL,
+        LAUNCH_SCRIPT: LAUNCH_SCRIPT,
+        SETUP_POLL_MS: SETUP_POLL_MS,
+        installedCommand: installedCommand,
+        parseInstalled: parseInstalled,
+        setupLaunch: setupLaunch,
         voiceCommand: voiceCommand,
         voiceStatusCommand: voiceStatusCommand,
         parseVoiceState: parseVoiceState,

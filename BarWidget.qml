@@ -1,4 +1,5 @@
 import QtQuick
+import Quickshell
 import Quickshell.Io
 import qs.Commons
 import qs.Ui
@@ -43,6 +44,21 @@ BarWidget {
   property bool expectRunning: false
   property int settleAttempts: 0
 
+  // Whether the daemon is installed at all: "unknown" until asked, then "yes" or
+  // "no". A plugin arrives by `omarchy plugin add`, which clones files and
+  // builds nothing, so the first thing anyone sees is a widget with no daemon
+  // behind it -- and "not running" is the wrong thing to say about that.
+  property string installed: "unknown"
+
+  // Setup has been handed to a terminal. There is no handle on that window, so
+  // this is only "somebody asked": it clears when the daemon turns up, and the
+  // panel lets the request be made again if the window was closed.
+  property bool settingUp: false
+
+  // packaging/setup.sh beside this file, as a filesystem path.
+  readonly property string setupScript:
+    decodeURIComponent(Qt.resolvedUrl("packaging/setup.sh").toString().replace(/^file:\/\//, ""))
+
   // Set when a power change was accepted by systemd but the daemon did not
   // follow. Empty the rest of the time.
   property string powerNote: ""
@@ -81,6 +97,23 @@ BarWidget {
   }
 
   function refresh() { root.send(Model.statusCommand()) }
+
+  // ---- Installing. The widget builds nothing and runs no sudo: it opens the
+  //      setup script in a terminal, where a person can watch it and answer the
+  //      password prompt, and then waits to see the daemon appear.
+  function checkInstalled() {
+    if (installProc.running) return
+    installProc.command = Model.installedCommand()
+    installProc.running = true
+  }
+
+  function runSetup() {
+    var argv = Model.setupLaunch(root.setupScript)
+    if (!argv) return
+    root.settingUp = true
+    Quickshell.execDetached(argv)
+    installPoll.restart()
+  }
 
   // ---- Power. Starting and stopping the unit is the real on/off switch.
   //
@@ -187,6 +220,8 @@ BarWidget {
   function statusJson() {
     return JSON.stringify({
       running: root.state.running,
+      installed: root.installed,
+      settingUp: root.settingUp,
       switching: root.switching,
       effect: root.state.effect,
       blur: root.state.blur,
@@ -238,6 +273,7 @@ BarWidget {
   onSettingsChanged: injectPanel()
 
   Component.onCompleted: {
+    root.checkInstalled()
     root.refresh()
     root.readVoice()
   }
@@ -253,6 +289,8 @@ BarWidget {
     if (unitProc.running) unitProc.running = false
     if (voiceProc.running) voiceProc.running = false
     if (voiceUnitProc.running) voiceUnitProc.running = false
+    if (installProc.running) installProc.running = false
+    installPoll.stop()
   }
 
   Process {
@@ -332,6 +370,37 @@ BarWidget {
     onExited: root.voice = Model.parseVoiceState(voiceOut.text)
   }
 
+  // `test -x` on the daemon: exit 0 is there, 1 is not, anything else says
+  // nothing and leaves the last answer standing.
+  Process {
+    id: installProc
+    onExited: function (exitCode, exitStatus) {
+      var answer = Model.parseInstalled(exitStatus === 0 ? exitCode : -1)
+      if (answer === "unknown") return
+      var was = root.installed
+      root.installed = answer
+      if (answer === "yes") {
+        root.settingUp = false
+        installPoll.stop()
+        // It has just appeared: read what it is doing instead of waiting for
+        // the next slow poll to say so.
+        if (was !== "yes") {
+          root.refresh()
+          root.readVoice()
+        }
+      }
+    }
+  }
+
+  // Quick while setup is running, since it ends when the package lands and
+  // nothing here is told. Stops itself when the daemon is there.
+  Timer {
+    id: installPoll
+    interval: Model.SETUP_POLL_MS
+    repeat: true
+    onTriggered: root.checkInstalled()
+  }
+
   Process {
     id: voiceUnitProc
     onExited: {
@@ -375,9 +444,14 @@ BarWidget {
     interval: 10000
     running: true
     repeat: true
-    onTriggered: if (!root.opened) {
-      root.refresh()
-      root.readVoice()
+    onTriggered: {
+      // Cheap, and the way a daemon installed by hand -- or removed -- is
+      // noticed without anybody opening the panel.
+      root.checkInstalled()
+      if (!root.opened) {
+        root.refresh()
+        root.readVoice()
+      }
     }
   }
 
@@ -405,6 +479,7 @@ BarWidget {
     function on(): void { root.startService() }
     function off(): void { root.stopService() }
     function togglePower(): void { root.toggleService() }
+    function setup(): void { root.runSetup() }
     function toggleVoice(): void { root.toggleVoice() }
     function status(): string { return root.statusJson() }
   }
@@ -420,7 +495,7 @@ BarWidget {
     active: root.opened || root.effectsOn || root.voice === "on"
     horizontalMargin: 8.75
     verticalPadding: 8.75
-    tooltipText: Model.tooltipFor(root.state, root.voice)
+    tooltipText: Model.tooltipFor(root.state, root.voice, root.installed)
 
     onPressed: function(b) { root.togglePanel() }
   }

@@ -37,8 +37,21 @@ builds nothing and runs nothing.
 ## Install
 
 ```bash
-cd packaging && makepkg -sfi        # -f: rebuild, rather than reuse an old package
 omarchy plugin add https://github.com/shilai-li/omarchy-studio-effects.git --enable
+```
+
+That is all of it. The daemon is a package, and `omarchy plugin add` builds
+nothing, so right after adding the plugin the bar widget knows the daemon is
+missing. Open its panel and it says so, with one row: **Set up**. Choosing it
+opens a terminal window that builds the daemon from the plugin's own checkout
+and installs it -- a few minutes, and it asks for your password there, where you
+can see it. The panel changes by itself when the package lands.
+
+The widget never builds anything or runs `sudo` itself; it only opens that
+window. To do the same by hand:
+
+```bash
+bash ~/.config/omarchy/plugins/shilai_li.studio-effects/packaging/setup.sh
 ```
 
 Installing the package creates the **Studio Camera** device and starts it at
@@ -49,6 +62,10 @@ browser, and turn effects on from the bar.
 
 If it is missing -- an install inside a container, say -- the daemon says so and
 how to make it: `sudo systemctl enable --now studio-effects-loopback`.
+
+Working on it rather than using it? `cd packaging && makepkg -sfi` builds from
+the checkout you are in. The `-f` matters: without it makepkg reuses an older
+package it built earlier and installs that.
 
 Only the loopback is enabled at boot. **Studio Camera is always there** — apps
 can select it and keep that selection — while the daemon behind it runs only

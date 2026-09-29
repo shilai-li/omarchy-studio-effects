@@ -35,6 +35,13 @@ Panel {
   readonly property string voice: host ? host.voice : "missing"
   readonly property string powerNote: host ? host.powerNote : ""
   readonly property bool voiceSwitching: host ? host.voiceSwitching === true : false
+
+  // The daemon is not there at all, which is a different problem from it not
+  // running and has a different fix: build one, not start one. Only a definite
+  // "no" counts, so a check that has not answered yet shows the ordinary panel
+  // rather than flashing an install offer at somebody who has the daemon.
+  readonly property bool notInstalled: host ? host.installed === "no" : false
+  readonly property bool settingUp: host ? host.settingUp === true : false
   readonly property var rows: Model.panelRows(root.state)
   readonly property var currentRow: selectedIndex >= 0 && selectedIndex < rows.length
     ? rows[selectedIndex] : null
@@ -66,6 +73,8 @@ Panel {
     // daemon's whole state. Asking for both would be one request too many --
     // only one command is in flight at a time, so the second would be dropped.
     if (root.host) root.host.setPreview(true)
+    // Installed by hand, or removed, since the last slow poll.
+    if (root.host) root.host.checkInstalled()
     // Voice focus is a different unit with a life of its own -- a keybinding or
     // systemctl may have changed it since the last poll.
     if (root.host) root.host.readVoice()
@@ -129,6 +138,8 @@ Panel {
   // ---- Actions. Choosing an effect leaves the panel up: the point is to see
   //      the change land, and the next thing a user does is often adjust it.
   function chooseSelected() {
+    // With no daemon there is exactly one thing to choose, and no rows to walk.
+    if (root.notInstalled) { root.host.runSetup(); return }
     if (!root.host || !root.currentRow) return
     if (root.currentRow.kind === "effect") {
       root.host.setEffect(root.currentRow.effect)
@@ -155,17 +166,21 @@ Panel {
     }
   }
 
+  // Both start a unit the package installs, so with no package they can only
+  // fail -- and fail as "systemd refused", which sends anyone looking in the
+  // wrong place.
   function togglePower() {
-    if (root.host) root.host.toggleService()
+    if (root.host && !root.notInstalled) root.host.toggleService()
   }
 
   function toggleVoice() {
-    if (root.host) root.host.toggleVoice()
+    if (root.host && !root.notInstalled) root.host.toggleVoice()
   }
 
   function handleTextKey(text) {
     var key = String(text).toLowerCase()
-    if (key === "r" && root.host) root.host.refresh()
+    if (key === "i" && root.notInstalled && root.host) root.host.runSetup()
+    else if (key === "r" && root.host) root.host.refresh()
     else if (key === "f" && root.host) root.host.toggle()
     else if (key === "c") root.togglePower()
     else if (key === "v") root.toggleVoice()
@@ -353,6 +368,88 @@ Panel {
           foreground: root.contentForeground
         }
 
+        // No daemon: say so, and offer the one thing that fixes it. Setup opens in a
+        // terminal because it builds a package and asks for sudo, neither of
+        // which a widget inside the shell should do -- and neither of which a
+        // person should have to take on trust from a window they cannot see.
+        Text {
+          width: parent.width
+          visible: root.notInstalled
+          textFormat: Text.PlainText
+          text: "The Studio Effects daemon is not installed yet.\n\n"
+              + "Setting up builds it and installs it as a package. That takes a few "
+              + "minutes and asks for your password, in a terminal window you can "
+              + "watch. The camera and microphone stay off until you turn them on."
+          color: root.contentForeground
+          font.family: root.contentFontFamily
+          font.pixelSize: Style.font.caption
+          wrapMode: Text.WordWrap
+          leftPadding: Style.space(8)
+          rightPadding: Style.space(8)
+          bottomPadding: Style.space(6)
+        }
+
+        CursorSurface {
+          id: setupRow
+          visible: root.notInstalled
+          width: parent.width
+          height: root.rowHeight
+          hasCursor: true
+          foreground: root.contentForeground
+          accent: Color.accent
+          fill: root.hoverFill
+          currentFill: root.selectedFill
+
+          MouseArea {
+            anchors.fill: parent
+            hoverEnabled: true
+            cursorShape: Qt.PointingHandCursor
+            onClicked: root.chooseSelected()
+          }
+
+          Text {
+            anchors.left: parent.left
+            anchors.leftMargin: Style.space(8)
+            anchors.verticalCenter: parent.verticalCenter
+            textFormat: Text.PlainText
+            text: root.settingUp ? "Set up again" : "Set up"
+            color: root.contentForeground
+            font.family: root.contentFontFamily
+            font.pixelSize: Style.font.body
+          }
+
+          Text {
+            anchors.right: parent.right
+            anchors.rightMargin: Style.space(8)
+            anchors.verticalCenter: parent.verticalCenter
+            textFormat: Text.PlainText
+            text: root.settingUp ? "…" : "enter"
+            color: root.accentColor
+            font.family: root.contentFontFamily
+            font.pixelSize: Style.font.body
+            font.bold: true
+          }
+        }
+
+        // Shown once it has been started. There is no handle on the terminal, so
+        // it cannot say when the window closes -- only that this panel will
+        // change by itself when the daemon appears, and that asking again is
+        // safe if the window was closed early.
+        Text {
+          width: parent.width
+          visible: root.notInstalled && root.settingUp
+          textFormat: Text.PlainText
+          text: "Working in the terminal window. This panel changes by itself when it "
+              + "finishes; if you closed the window, set up again."
+          color: root.dim
+          font.family: root.contentFontFamily
+          font.pixelSize: Style.font.caption
+          wrapMode: Text.WordWrap
+          leftPadding: Style.space(8)
+          rightPadding: Style.space(8)
+          topPadding: Style.space(4)
+        }
+
         // The real switch. Off is not "effects disabled" but "the camera is
         // released": while the daemon runs it holds the camera open, the
         // recording light stays lit, and nothing else can open the real
@@ -360,6 +457,7 @@ Panel {
         // choice buried among them.
         CursorSurface {
           id: powerRow
+          visible: !root.notInstalled
           width: parent.width
           height: root.rowHeight
           hasCursor: false
@@ -428,6 +526,7 @@ Panel {
         // fails on its own.
         CursorSurface {
           id: voiceRow
+          visible: !root.notInstalled
           width: parent.width
           height: root.rowHeight
           hasCursor: false
@@ -475,7 +574,7 @@ Panel {
 
         Text {
           width: parent.width
-          visible: !root.running && !root.switching
+          visible: !root.running && !root.switching && !root.notInstalled
           textFormat: Text.PlainText
           // A status line, not a caution. The earlier wording spelled out that
           // turning the camera on would light the recording LED, which is both
@@ -658,7 +757,8 @@ Panel {
         Text {
           width: parent.width
           textFormat: Text.PlainText
-          text: !root.running ? "c camera   v voice   esc close"
+          text: root.notInstalled ? "enter set up   esc close"
+              : !root.running ? "c camera   v voice   esc close"
               : root.currentRow && root.currentRow.kind === "param"
               ? "↑↓ move   ←→ adjust   c off   v voice   esc close"
               : root.currentRow && root.currentRow.kind === "choice"

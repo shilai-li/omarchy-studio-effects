@@ -385,6 +385,63 @@ check("the model command names the model, and refuses to name nothing", () => {
   eq(M.choiceCommand("nonsense", "segmentation"), null)
 })
 
+// ---- Whether the daemon exists, and how setup is started.
+
+check("installed is asked of the filesystem by absolute path", () => {
+  ok(M.DAEMON.startsWith("/") && M.TEST.startsWith("/"), "both named absolutely")
+  eq(M.installedCommand(), [M.TEST, "-x", M.DAEMON])
+})
+
+check("only a clean yes or no decides installed; anything else is unknown", () => {
+  eq(M.parseInstalled(0), "yes")
+  eq(M.parseInstalled(1), "no")
+  // Could not run, or was killed: that says nothing about the daemon, and
+  // "not installed" would offer to reinstall something that is there.
+  for (const code of [-1, 2, 126, 127, 137, null, undefined]) eq(M.parseInstalled(code), "unknown")
+})
+
+check("setup is started through a fixed shell with the path as an argument", () => {
+  const script = "/home/x/.config/omarchy/plugins/p/packaging/setup.sh"
+  const argv = M.setupLaunch(script)
+  eq(argv[0], "/usr/bin/bash")
+  eq(argv[1], "-c")
+  eq(argv[argv.length - 1], script)
+  // The path is data. It must not appear in the script text, or a path with a
+  // quote or a space in it becomes code.
+  ok(argv[2].indexOf(script) === -1, "the script text must not contain the path")
+  ok(argv[2].indexOf("$1") !== -1, "and reads it as $1")
+})
+
+check("a hostile path is passed through untouched, not interpreted", () => {
+  const nasty = "/tmp/a b/$(touch pwned)/`id`/x'y\"z/setup.sh"
+  const argv = M.setupLaunch(nasty)
+  eq(argv[argv.length - 1], nasty)
+  ok(argv[2].indexOf("touch pwned") === -1 && argv[2].indexOf("`id`") === -1, "nothing spliced in")
+})
+
+check("setup refuses a path that is empty, relative or not a string", () => {
+  for (const bad of ["", "setup.sh", "./setup.sh", "../setup.sh", null, undefined, 42, {}])
+    eq(M.setupLaunch(bad), null)
+})
+
+check("the launchers are found on a fixed PATH, not the inherited one", () => {
+  const s = M.LAUNCH_SCRIPT
+  ok(s.indexOf("PATH=/usr/share/omarchy/bin:/usr/bin:/bin") !== -1, "trusted() sets PATH itself")
+  ok(s.indexOf("omarchy-launch-floating-terminal-with-presentation") !== -1, "prefers Omarchy's own")
+  ok(s.indexOf("xdg-terminal-exec") !== -1, "falls back to the default terminal")
+  // The presenter joins its arguments into a string a shell parses: it must be
+  // handed one already quoted, or a path with a space runs as two commands.
+  ok(s.indexOf("%q") !== -1, "the command handed to the presenter is quoted")
+})
+
+check("the tooltip says so when the daemon is not installed", () => {
+  ok(M.tooltipFor(M.notRunningState(), "off", "no").indexOf("not installed") !== -1)
+  // Installed or not yet known: the ordinary wording, so a slow check does not
+  // flash "not installed" at somebody who has it.
+  for (const i of ["yes", "unknown", undefined])
+    ok(M.tooltipFor(M.notRunningState(), "off", i).indexOf("not installed") === -1, String(i))
+})
+
 if (failures.length) {
   console.error(failures.length + " failed, " + passed + " passed\n")
   for (const f of failures) console.error("  " + f)

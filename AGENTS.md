@@ -33,7 +33,8 @@ pipeline belongs. So the widget is a control surface over IPC and nothing more.
 
 When the daemon is absent the widget says so, the way Recent Paths reports a
 missing zoxide — an explicit "not installed" state, never an empty panel that
-looks like a working one with no effects.
+looks like a working one with no effects. And it offers the fix: see "The first
+run", below.
 
 ## Layout
 
@@ -63,6 +64,8 @@ daemon/examples/preview_cost.rs    how long the preview holds up the frame loop
 daemon/examples/frame_cost.rs      each CPU stage of the frame loop, no camera needed
 daemon/examples/devices.rs         every model on every device this machine has, compared
 packaging/               systemd units, PKGBUILD, example config
+packaging/setup.sh       what the widget opens in a terminal to build and install the daemon
+test/setup-test.sh       the setup script's dry run and its refusals, no sudo
 ```
 
 ## Ground truth — read it, don't guess
@@ -852,6 +855,49 @@ Temporal smoothing is deliberately mild. It steadies edges while someone sits
 still, but it is a lag: turned up, it smears the silhouette behind anyone who
 moves, which is a worse version of the problem it was added to fix.
 
+**The first run: the widget asks, a terminal does.** The intended flow is
+`omarchy plugin add`, then the panel offers to build and install the daemon. The
+installer will not: it clones files and runs nothing, so a fresh plugin has no
+daemon behind it. And the widget must not: it is unsandboxed code inside the
+shell, and building a package and answering a `sudo` prompt are not things to do
+from a process nobody is watching. So it opens `packaging/setup.sh` in a terminal
+window -- Omarchy's floating one, the default terminal as the fallback -- and
+polls for `/usr/bin/studio-effects-daemon` until it appears. Rule 3 below is
+about what the widget does, and it still holds: the terminal is the person's,
+and the password prompt is answered in it.
+
+"Not installed" is its own state and not a flavour of "not running", because the
+fix is different -- build one, not start one -- and because the camera and voice
+rows would only fail there, as "systemd refused", which sends anyone looking in
+the wrong place. Only a definite exit 1 from `test -x` counts. A check that could
+not run says nothing, and answering it with "not installed" would offer to
+reinstall something that is there.
+
+Three things about the script are not the obvious way round, and each was a
+mistake waiting to be made:
+
+- **It builds in a clone under `~/.cache`, never in the plugin's folder.**
+  makepkg leaves `src` and `pkg` symlinks beside the PKGBUILD, and Omarchy's
+  validator refuses a plugin folder containing a symlink -- so a build in place
+  would leave the plugin unable to be validated or updated. (It shows on a
+  development checkout that has been built in: `omarchy plugin validate .`
+  fails on `packaging/src`. Validate a clean copy.)
+- **It builds from a checkout of its own.** The PKGBUILD reads `git archive HEAD`
+  of the directory above it, so a copy of the files, or a folder inside somebody's
+  dotfiles repository, would build nothing or the wrong project. The script
+  refuses both, with the reason. It is also why the plugin must be added with
+  `omarchy plugin add` and not copied in with `git archive | tar`, which is fine
+  for the QML and useless for this.
+- **The path reaches the shell as an argument and is quoted twice.** Omarchy's
+  launcher joins its arguments into one string that a shell parses, so a path with
+  a space or a `$(...)` in it would run as something else. `%q` quotes it first;
+  `test/model-test.js` holds the launch script to that, and it was checked
+  against a path made of metacharacters.
+
+There is no handle on the terminal window, so the widget cannot tell "still
+working" from "closed early". The panel says which it knows -- that setup was
+asked for -- and lets it be asked again.
+
 **Devices are found by card label, never by number.** A loopback takes whatever
 number is free when it is created, and that changes: the same machine with the
 same setup gave /dev/video51 one boot and /dev/video10 the next. The unit does
@@ -912,6 +958,7 @@ ldd daemon/target/release/studio-effects-daemon | grep openvino_c
 
 omarchy plugin validate .           # manifest + entry points
 bash test/model-test.sh             # Model.js under plain node, no compositor
+bash test/setup-test.sh             # the setup script: dry run, and the layouts it refuses
 bash test/voice-check.sh            # does Voice Focus pass your voice? (talk into it)
 
 # Reinstall AND restart, in that order. Reinstalling alone leaves the running
@@ -967,7 +1014,10 @@ for that reason; don't re-add it as "the original".
 2. Measure before optimising, and put the number in this file. Every performance
    claim here is reproducible with a command in the repo.
 3. The plugin half runs unsandboxed inside the shell. No network, no `sudo`, and
-   nothing written outside `~/.local/state/omarchy/studio-effects/`.
+   nothing written outside `~/.local/state/omarchy/studio-effects/`. The one
+   thing it may start is a terminal window running `packaging/setup.sh`, on a
+   person's say-so, because a terminal is theirs to watch and answer a password
+   in -- the widget itself still builds nothing and runs no `sudo`.
 4. Keep settings mirrored: `manifest.json`'s `barWidget.schema`, the daemon's
    config, and whatever clamps them.
 5. Never enable effects on a camera the user did not point the daemon at, and
