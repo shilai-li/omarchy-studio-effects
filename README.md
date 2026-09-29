@@ -134,6 +134,9 @@ CAPTURE_WIDTH=1920
 CAPTURE_HEIGHT=1080
 ```
 
+(`WIDTH` and `HEIGHT` default to 0, which means the camera's own best up to
+1080p, so setting them is how you publish *less* than the camera gives.)
+
 Zooming to 150% is then a straight 1:1 read with no softness at all, and it
 costs about 3 ms of CPU a frame with a USB camera -- one to scale the picture,
 two more to decode a bigger one -- because blur and compositing still run at
@@ -313,12 +316,16 @@ pipeline gets measured on a machine with no spare loopback device. `--snapshot`
 writes one processed frame as a PNG, which is the only way to see what the
 composite looks like without one.
 
-Per frame on the NPU, USB camera, blur radius 12: **5.28 ms at 720p** (16% of
-the 33 ms budget) and **7.06 ms at 1080p** (21%). 1080p30 fits; it did not at
-first -- the first working version landed on 33.28 ms -- and the gap closed in
-how the pixels are walked, not the model. 720p is still the default because on
-battery the CPU stages roughly double and 1080p leaves little headroom. See
-AGENTS.md for the per-stage numbers.
+The picture is whatever the camera offers, up to 1920x1080, at the fastest rate
+it has up to 60 fps -- 1080p at 30 on most laptop cameras. A camera without 1080p
+gets its own best mode and is not stretched to fit, and a machine without an
+NPU runs the same models on its GPU, or on the CPU, with the same result.
+
+The frame loop's CPU work is 1.1 ms a frame at 720p and about 2 at 1080p (a
+P-core, blur at the default radius); with a USB camera the MJPEG decode on the
+capture thread costs more than that, 3.5 ms at 720p and about 7 at 1080p. See
+AGENTS.md for the per-stage numbers, which were first measured before this got
+about five times cheaper.
 
 See [AGENTS.md](AGENTS.md) for the architecture, the measurements it rests on,
 and house style.

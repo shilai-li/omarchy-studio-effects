@@ -1,6 +1,7 @@
 //! Shared by the daemon and the `studio-effects` client that controls it.
 
 pub mod background;
+pub mod camera;
 pub mod control;
 pub mod device;
 pub mod framing;

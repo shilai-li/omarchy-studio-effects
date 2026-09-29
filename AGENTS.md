@@ -55,6 +55,7 @@ daemon/src/background.rs decoding a replacement background once
 daemon/src/preview.rs    the JPEG the bar widget shows
 daemon/src/segmenter.rs  device choice, model cache, one inference per frame
 daemon/src/device.rs     resolving a v4l2 device by card label
+daemon/src/camera.rs     what the camera offers, and which mode to open
 daemon/src/framing.rs    where to crop so the subject stays centred
 daemon/src/control.rs    the unix-socket control protocol and its state
 daemon/src/bin/studio-effects.rs   the client that speaks it
@@ -169,9 +170,13 @@ cores sit around 1.2 GHz. The CPU stages roughly double; the NPU barely moves:
 
 That 2.2x on blur against 1.16x on inference is the clearest evidence for the
 whole design: the part running on the NPU is nearly immune to the power limit
-that halves everything on the CPU. It is also why 720p is the default -- on
-battery, which is when a laptop is on a call, 1080p leaves little headroom and
-1080p with framing has none (96%).
+that halves everything on the CPU. It is why 720p was once the default -- on
+battery, which is when a laptop is on a call, 1080p left little headroom and
+1080p with framing had none (96%). The default is 1080p now, because the CPU
+stages cost a fifth of what they did (see below) and the camera decides the
+size; but that reasoning was about battery, and it has not been re-measured
+there. A laptop on battery that runs warm is the first place to look, and
+`WIDTH=1280` / `HEIGHT=720` in the config is the way back.
 
 Re-measure on battery before believing any budget claim in this file. The table
 above predates both rounds of blur work below; the 20 ms it shows is the thing
@@ -773,19 +778,38 @@ studio-effects` before testing by hand. This costs at least one debugging
 session per person who forgets, so it is worth suspecting early: startup lines
 present, no timing lines, no error.
 
-**Ask the camera for the size you want, ahead of decodebin.** `decodebin`
-accepts anything, so `v4l2src` behind it never learns what size is wanted
-downstream and opens the camera's largest mode. The 720p default spent its life
-decoding 1080p MJPEG and scaling it down: 6.35 ms of CPU a frame, where asking
-for 720p costs 3.52. Nothing showed it, because the decode runs on GStreamer's
-capture thread and the timing line times only the frame loop -- a third of the
-daemon's CPU, and in no number in this file.
+**Ask the camera what it can do, and hold the source to one mode ahead of
+decodebin.** `decodebin` accepts anything, so `v4l2src` behind it never learns
+what is wanted downstream and opens the camera's largest mode. The 720p default
+spent its life decoding 1080p MJPEG and scaling it down: 6.35 ms of CPU a frame,
+where asking for 720p costs 3.52. Nothing showed it, because the decode runs on
+GStreamer's capture thread and the timing line times only the frame loop -- a
+third of the daemon's CPU, and in no number in this file.
 
-The capture caps now list the size first, raw before MJPEG because raw needs no
-decode, then anything, so a camera without that size still opens: asked for
-1024x576, this one gives its nearest mode, 960x540, and `videoscale` makes up
-the difference. The daemon says what it got, once, on the first frame --
-`camera delivers image/jpeg 1280x720 at 30/1 fps` -- and that line is the one to
+Asking for a size and a rate the camera may not have is the other half of that
+mistake, and it is why nothing here is a fixed default. `camera.rs` reads the
+camera's modes -- `v4l2src` taken to READY, which starts nothing and leaves the
+recording light off, then its caps queried -- and `pick` chooses under a ceiling:
+the biggest size that fits under `WIDTH` x `HEIGHT` (zero means 1920x1080), the
+highest rate at or under `FPS` (60), raw over MJPEG at a tie. `FPS=60` is a
+ceiling and not a demand: this camera has no 60 and a hard 60 fails to
+negotiate, so a default of 60 that meant "exactly" would refuse to open on most
+machines. A size the camera lacks is held to what it has -- 4K asks get 1080p,
+1024x576 gets 960x540 -- and never scaled up to, and a 4:3 camera stays 4:3
+rather than being stretched.
+
+A mode slower than 15 fps loses to a usable smaller one, because cameras offer
+uncompressed 1080p at 3-5 fps beside their real modes and the size alone must
+not win. Only the last resort is slow.
+
+Two things in the caps bit and are worth knowing. GStreamer folds sizes that
+share a width and a rate into a **list**, `height=(int){ 480, 360 }`, so a
+parser that reads only single numbers silently loses the 4:3 mode -- the first
+version did, and a request for 640x480 quietly got 848x480. And a raw mode is
+listed twice, once as `DMA_DRM` for GPU-memory pipelines, which is left out.
+
+The daemon says what it got, once, on the first frame --
+`camera delivers image/jpeg 1920x1080 at 30/1 fps` -- and that line is the one to
 read before believing a capture setting did what it says. Measured over counted
 frames, with a capture-only run subtracted:
 

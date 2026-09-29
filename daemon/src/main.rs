@@ -9,7 +9,7 @@
 use anyhow::{Context, Result};
 use std::sync::{Arc, Mutex};
 use studio_effects_daemon::control::{self, Effect, Fixed, Settings};
-use studio_effects_daemon::{background, device, framing, mask, nv12, preview, segmenter, state};
+use studio_effects_daemon::{background, camera, device, framing, mask, nv12, preview, segmenter, state};
 use clap::Parser;
 use gstreamer as gst;
 use gstreamer::prelude::*;
@@ -34,13 +34,21 @@ struct Args {
     #[arg(long)]
     list_devices: bool,
 
-    #[arg(long, default_value_t = 1280)]
+    /// Size of the picture published, in pixels. Zero asks the camera: the
+    /// biggest mode it has up to 1920x1080, which is what most cameras top out
+    /// at and more than any call transmits. A size the camera does not have is
+    /// held to the nearest one it does, never scaled up to.
+    #[arg(long, default_value_t = 0)]
     width: u32,
 
-    #[arg(long, default_value_t = 720)]
+    #[arg(long, default_value_t = 0)]
     height: u32,
 
-    #[arg(long, default_value_t = 30)]
+    /// The most frames a second to ask for. A ceiling, not a demand: the camera
+    /// runs at the fastest rate it offers at or under this, so the default of
+    /// 60 gives 60 on a camera that has it and 30 on one that does not, where
+    /// insisting on 60 would refuse to open the second.
+    #[arg(long, default_value_t = 60)]
     fps: u32,
 
     /// Capture from the camera at this size and publish at --width/--height.
@@ -74,9 +82,9 @@ struct Args {
     #[arg(long, default_value_t = 12)]
     blur: usize,
 
-    /// Repeats of the box blur, 1 to 3. One is cheapest and looks boxy against
-    /// a hard edge; two is close enough to a Gaussian for a background.
-    #[arg(long, default_value_t = 2)]
+    /// Repeats of the box blur, 1 to 3. One is cheapest and can look boxy
+    /// against a hard edge; two is close enough to a Gaussian for a background.
+    #[arg(long, default_value_t = 1)]
     passes: usize,
 
     /// Darken the background, 0 to 100. Makes the subject stand out without
@@ -253,7 +261,7 @@ impl Timings {
     /// at twice the size anyone asked for, a third or more of the daemon's
     /// CPU, in no stage; and in dim light the camera drops to 8-10 fps, which
     /// turns every "per second" figure worked out from 30 into fiction.
-    fn report(&mut self, device: &str) {
+    fn report(&mut self, device: &str, budget_ms: f64) {
         let n = self.frames as f64;
         let total = self.prep + self.infer + self.blur + self.blend + self.frame;
         let wall = self.since.elapsed().as_secs_f64();
@@ -267,14 +275,14 @@ impl Timings {
         };
         println!(
             "{device:>3}  {:5.2} ms/frame  (prep {:4.2}  infer {:4.2}  blur {:4.2}  blend {:4.2}  frame {:4.2})  \
-             {:5.1}% of a 33 ms budget  --  {:.1} fps{whole}",
+             {:5.1}% of a {budget_ms:.1} ms budget  --  {:.1} fps{whole}",
             total / n,
             self.prep / n,
             self.infer / n,
             self.blur / n,
             self.blend / n,
             self.frame / n,
-            100.0 * (total / n) / 33.3,
+            100.0 * (total / n) / budget_ms,
             n / wall,
         );
         *self = Self::new();
@@ -355,32 +363,75 @@ fn main() -> Result<()> {
     let mut seg = segmenter::Segmenter::new(&resolve_model(&loaded), &args.cache, args.device.as_deref())?;
     println!("segmenting on {} with the {} model", seg.device, seg.model);
 
-    // decodebin because a USB camera hands over MJPEG while a loopback hands
-    // over raw NV12, and the daemon should not care which.
-    // Zero means "same as the output", which is the ordinary case.
-    let cap_w = if args.capture_width == 0 { args.width } else { args.capture_width };
-    let cap_h = if args.capture_height == 0 { args.height } else { args.capture_height };
+    // What the camera can do decides what is asked of it. A size and a rate
+    // from the config are a ceiling to pick under, and zero means "whatever it
+    // has, up to 1080p". Both settings used to be taken as facts about a camera
+    // nobody had asked, so one without 1080p was stretched to it and one
+    // without 60 fps would not open.
+    let modes = camera::probe(&input).unwrap_or_else(|e| {
+        eprintln!("could not ask {input} what it can do ({e:#}); assuming 1280x720 at 30 fps");
+        Vec::new()
+    });
+    let auto = args.width == 0 || args.height == 0;
+    let (want_w, want_h) = if auto { (1920, 1080) } else { (args.width, args.height) };
+    let out_mode = camera::pick(&modes, want_w, want_h, args.fps);
 
-    // What the camera is asked for, ahead of decodebin. decodebin accepts
-    // anything, so without this v4l2src never learns what size is wanted
+    // Capture bigger than the output only when asked to, for framing's sake.
+    let capture_asked = args.capture_width != 0 && args.capture_height != 0;
+    let cap_mode = if capture_asked {
+        camera::pick(&modes, args.capture_width, args.capture_height, args.fps)
+    } else {
+        out_mode
+    };
+
+    // No modes at all -- a device that would not say -- keeps the old way of
+    // asking: the config's size, or 1280x720, held to 30 fps.
+    let fallback = camera::Mode {
+        media: camera::Media::Jpeg,
+        width: if auto { 1280 } else { args.width },
+        height: if auto { 720 } else { args.height },
+        rate: (args.fps.min(30) as i32, 1),
+    };
+    let cap = cap_mode.unwrap_or(fallback);
+    let (cap_w, cap_h) = (cap.width, cap.height);
+    let fps = cap.rate;
+
+    // The output is what was asked for, or the camera's own size when nothing
+    // was -- and never bigger than what is captured, since a picture scaled up
+    // from a smaller camera is no better than the camera's own and costs more
+    // to blur.
+    let (mut out_w, mut out_h) = match (auto, out_mode) {
+        (true, Some(m)) => (m.width, m.height),
+        (true, None) => (fallback.width, fallback.height),
+        (false, _) => (args.width, args.height),
+    };
+    if out_w > cap_w || out_h > cap_h {
+        println!("the camera has no {out_w}x{out_h}; publishing {cap_w}x{cap_h}");
+        (out_w, out_h) = (cap_w, cap_h);
+    }
+    // NV12's chroma is half the size in both directions.
+    (out_w, out_h) = (out_w & !1, out_h & !1);
+    let fps_text = format!("{}/{}", fps.0, fps.1);
+
+    // The source is held to the mode picked, ahead of decodebin. decodebin
+    // accepts anything, so without this v4l2src never learns what is wanted
     // downstream and opens the camera's largest mode: the 720p default was
     // decoding 1080p MJPEG and scaling it down on every frame, 6.35 ms of CPU
     // where asking for 720p costs 3.52 -- on the capture thread, where the
-    // timing line never sees it.
-    //
-    // Raw first, because raw needs no decode; then MJPEG at the same size;
-    // then anything, so a camera without this size still opens and videoscale
-    // makes up the difference, as it always did.
-    let wanted = format!(
-        "video/x-raw,width={cap_w},height={cap_h},framerate={fps}/1;\
-         image/jpeg,width={cap_w},height={cap_h},framerate={fps}/1;image/jpeg;video/x-raw",
-        fps = args.fps
-    );
+    // timing line never sees it. Then anything, so a device that reported
+    // nothing usable still opens and videoscale makes up the difference.
+    let wanted = if cap_mode.is_some() {
+        cap.caps()
+    } else {
+        format!(
+            "video/x-raw,width={cap_w},height={cap_h},framerate={fps_text};\
+             image/jpeg,width={cap_w},height={cap_h},framerate={fps_text};image/jpeg;video/x-raw"
+        )
+    };
     let src = format!(
-        "v4l2src name=camera device={} ! {wanted} ! decodebin ! videoconvert ! videoscale \
-         ! video/x-raw,format=NV12,width={},height={},framerate={}/1 \
+        "v4l2src name=camera device={input} ! {wanted} ! decodebin ! videoconvert ! videoscale \
+         ! video/x-raw,format=NV12,width={cap_w},height={cap_h},framerate={fps_text} \
          ! appsink name=sink max-buffers=2 drop=true sync=false",
-        input, cap_w, cap_h, args.fps
     );
     let pipeline = gst::parse::launch(&src)
         .context("building the capture pipeline")?
@@ -399,9 +450,8 @@ fn main() -> Result<()> {
         .map(|dev| -> Result<(gst::Pipeline, gst_app::AppSrc)> {
             let desc = format!(
                 "appsrc name=src is-live=true format=time \
-                 caps=video/x-raw,format=NV12,width={},height={},framerate={}/1 \
-                 ! videoconvert ! v4l2sink device={} sync=false",
-                args.width, args.height, args.fps, dev
+                 caps=video/x-raw,format=NV12,width={out_w},height={out_h},framerate={fps_text} \
+                 ! videoconvert ! v4l2sink device={dev} sync=false",
             );
             let p = gst::parse::launch(&desc)
                 .context("building the output pipeline")?
@@ -421,8 +471,8 @@ fn main() -> Result<()> {
     println!(
         "reading {} at {}x{}{}",
         input,
-        args.width,
-        args.height,
+        out_w,
+        out_h,
         match &output {
             Some(d) => format!(", writing {d}"),
             None => ", discarding output (pass --output to publish)".into(),
@@ -436,17 +486,17 @@ fn main() -> Result<()> {
     // `w`/`h` are the output, which is what everything downstream of the
     // resample works in. The capture size is only the segmentation's and the
     // crop's business.
-    let (w, h) = (args.width as usize, args.height as usize);
+    let (w, h) = (out_w as usize, out_h as usize);
     let (cw, ch) = (cap_w as usize, cap_h as usize);
     let scaling = (cw, ch) != (w, h);
     if scaling {
-        println!("capturing {cap_w}x{cap_h}, publishing {}x{}", args.width, args.height);
+        println!("capturing {cap_w}x{cap_h}, publishing {out_w}x{out_h}");
     }
 
     // The published frame, built fresh each time rather than copied from the
     // input: the input is the capture size and this is the output size.
-    let out_info = gst_video::VideoInfo::builder(gst_video::VideoFormat::Nv12, args.width, args.height)
-        .fps(gst::Fraction::new(args.fps as i32, 1))
+    let out_info = gst_video::VideoInfo::builder(gst_video::VideoFormat::Nv12, out_w, out_h)
+        .fps(gst::Fraction::new(fps.0, fps.1))
         .build()?;
     let out_y_stride = out_info.stride()[0] as usize;
     let out_uv_stride = out_info.stride()[1] as usize;
@@ -469,7 +519,7 @@ fn main() -> Result<()> {
     // `replace`, so switching to it over the socket is instant rather than a
     // decode stall mid-call.
     let backdrop = match background_path {
-        Some(path) => Some(background::Background::load(path, args.width, args.height)?),
+        Some(path) => Some(background::Background::load(path, out_w, out_h)?),
         None if args.effect == Effect::Replace => {
             anyhow::bail!("--effect replace needs --background <image>")
         }
@@ -527,8 +577,8 @@ fn main() -> Result<()> {
             models: models.clone(),
             input: input.clone(),
             output: output.clone().unwrap_or_else(|| "(none)".into()),
-            width: args.width,
-            height: args.height,
+            width: out_w,
+            height: out_h,
             preview_path: preview::Preview::path_for_runtime()
                 .to_string_lossy()
                 .into_owned(),
@@ -763,7 +813,7 @@ fn main() -> Result<()> {
         // as if the camera were still on.
         if want_preview {
             if preview.is_none() {
-                match preview::Preview::new(args.height as i32, args.width as i32) {
+                match preview::Preview::new(out_h as i32, out_w as i32) {
                     Ok(p) => preview = Some(p),
                     Err(e) => eprintln!("preview unavailable: {e:#}"),
                 }
@@ -795,7 +845,7 @@ fn main() -> Result<()> {
 
         timings.frames += 1;
         if args.stats_every > 0 && timings.frames >= args.stats_every {
-            timings.report(&seg.device);
+            timings.report(&seg.device, 1e3 * f64::from(fps.1) / f64::from(fps.0.max(1)));
         }
 
     }
