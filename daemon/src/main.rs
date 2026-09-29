@@ -356,7 +356,22 @@ fn main() -> Result<()> {
     gst::init().context("initialising GStreamer")?;
 
     let input = device::resolve(&args.input)?;
-    let output = args.output.as_deref().map(device::resolve).transpose()?;
+    let output = args
+        .output
+        .as_deref()
+        .map(|spec| {
+            device::resolve(spec).with_context(|| {
+                // The one device this daemon cannot make for itself, and the
+                // first thing a fresh install trips over.
+                if spec == "Studio Camera" {
+                    "Studio Camera is created by the loopback service, which needs root: \
+                     sudo systemctl enable --now studio-effects-loopback"
+                } else {
+                    "resolving the output device"
+                }
+            })
+        })
+        .transpose()?;
 
     let models = installed_models();
     let mut loaded = args.model.trim_end_matches(".xml").rsplit('/').next().unwrap_or("segmentation").to_string();

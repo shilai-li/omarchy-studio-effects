@@ -37,13 +37,18 @@ builds nothing and runs nothing.
 ## Install
 
 ```bash
-cd packaging && makepkg -si
-sudo systemctl enable --now studio-effects-loopback   # creates "Studio Camera"
+cd packaging && makepkg -sfi        # -f: rebuild, rather than reuse an old package
 omarchy plugin add https://github.com/shilai-li/omarchy-studio-effects.git --enable
 ```
 
-Then pick **Studio Camera** in Zoom, Meet, or any browser, and turn effects on
-from the bar.
+Installing the package creates the **Studio Camera** device and starts it at
+boot, so there is nothing to enable by hand -- the daemon can only write to a
+camera that exists, and making one needs root, so the package does it. Removing
+the package removes the device. Then pick **Studio Camera** in Zoom, Meet, or any
+browser, and turn effects on from the bar.
+
+If it is missing -- an install inside a container, say -- the daemon says so and
+how to make it: `sudo systemctl enable --now studio-effects-loopback`.
 
 Only the loopback is enabled at boot. **Studio Camera is always there** — apps
 can select it and keep that selection — while the daemon behind it runs only

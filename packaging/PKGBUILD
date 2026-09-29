@@ -28,6 +28,10 @@ depends=('openvino' 'gstreamer' 'gst-plugins-base' 'gst-plugins-good'
          'pipewire' 'wireplumber' 'noise-suppression-for-voice')
 makedepends=('cargo' 'python-openvino')
 
+# Creates the Studio Camera device when the package is installed and removes it
+# when the package is. See the file for why that is not left to the reader.
+install=omarchy-studio-effects.install
+
 # The NPU is the point, but the daemon falls back to GPU and then CPU, so none
 # of these is required to have a working camera.
 optdepends=('intel-npu-driver: segmentation on the NPU'

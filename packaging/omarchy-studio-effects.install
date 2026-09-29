@@ -1,0 +1,32 @@
+# Runs as root when the package is installed, upgraded or removed.
+#
+# The daemon writes to a camera called "Studio Camera", and that camera has to
+# exist before the daemon can start: it is a v4l2loopback device, creating one
+# needs root, and a user service cannot do it. Leaving it as a step for the
+# reader -- "now run sudo systemctl enable --now ..." -- meant a fresh install
+# whose first attempt to turn the camera on failed with a device it could not
+# find. So installing the package creates it.
+#
+# Only the loopback is switched on. The daemon and the microphone filter stay
+# off until asked for, because while they run they hold the camera and the
+# microphone.
+
+_unit=studio-effects-loopback.service
+
+post_install() {
+    if ! systemctl enable --now "$_unit"; then
+        echo "==> Could not create the Studio Camera device. Do it by hand with:"
+        echo "      sudo systemctl enable --now $_unit"
+    fi
+}
+
+post_upgrade() {
+    post_install
+}
+
+pre_remove() {
+    # Stopping it deletes the device, so nothing is left in every app's camera
+    # list once the program behind it is gone. Removal must never fail on this:
+    # the device may be open in a call, or the unit may already be stopped.
+    systemctl disable --now "$_unit" || true
+}

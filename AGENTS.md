@@ -518,6 +518,21 @@ an app can select it once and keep that selection, while the daemon behind it
 comes and goes. Merging them would mean either a camera that vanishes from
 every app's picker when effects are off, or a camera held open all day.
 
+**Installing the package creates the device.** Studio Camera is a v4l2loopback
+device, making one needs root, and a user service cannot -- so the daemon can
+only write to it if something with root has already made it. That used to be a
+step in the README after `makepkg -si`, and a fresh install that skipped it got
+a daemon that exited with "no video device is called Studio Camera", which the
+widget can only report as "not answering". `packaging/omarchy-studio-effects.install`
+runs `systemctl enable --now studio-effects-loopback` on install and upgrade and
+`disable --now` before removal, which also deletes the device. It never fails the
+transaction: a container with no systemd prints the command instead. Only the
+loopback is switched on; the daemon and the voice filter stay off until asked
+for, because they hold the camera and the microphone. The daemon's error names
+the command, since a hook that could not run leaves the reader with only that.
+Omarchy's own relay, `Hardware ISP Camera`, is not an alternative input here: on
+this machine it delivers no frames to anything.
+
 Starting is not instant: systemd returns before the daemon has opened the
 camera, so the widget re-reads the state until it agrees rather than concluding
 from one silent reply that starting failed, and says "…" while it waits. A
