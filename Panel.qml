@@ -128,11 +128,12 @@ Panel {
     root.selectedIndex = Model.indexOfEffect(root.state, root.rows)
   }
 
+  // Walks past hints: they are there to be read, and a cursor that could stop on
+  // one would show a highlight on a row that enter does nothing on.
   function moveCursor(delta) {
     if (root.rows.length === 0) return
     root.cursorActive = true
-    var next = (root.selectedIndex + delta) % root.rows.length
-    root.selectedIndex = next < 0 ? next + root.rows.length : next
+    root.selectedIndex = Model.nextSelectable(root.rows, root.selectedIndex, delta < 0 ? -1 : 1)
   }
 
   // ---- Actions. Choosing an effect leaves the panel up: the point is to see
@@ -200,6 +201,10 @@ Panel {
   onRowsChanged: {
     if (root.selectedIndex >= root.rows.length)
       root.selectedIndex = Math.max(0, root.rows.length - 1)
+    // Rows come and go with the daemon's state, so the cursor can be left on a
+    // hint that has just appeared under it.
+    if (!Model.isSelectable(root.rows[root.selectedIndex]))
+      root.selectedIndex = Model.nextSelectable(root.rows, root.selectedIndex, -1)
   }
 
   // ---- One row. Either an effect to choose or a setting to adjust; they share
@@ -213,21 +218,27 @@ Panel {
     readonly property bool isParam: modelData && modelData.kind === "param"
     readonly property bool isToggle: modelData && modelData.kind === "toggle"
     readonly property bool isChoice: modelData && modelData.kind === "choice"
+    readonly property bool isHint: modelData && modelData.kind === "hint"
+    readonly property var hintSpec: row.isHint ? Model.hintFor(modelData.key) : null
     readonly property var toggleSpec: row.isToggle ? Model.toggleFor(modelData.key) : null
     readonly property var choiceSpec: row.isChoice ? Model.choiceFor(modelData.key) : null
     readonly property string effect: modelData && modelData.effect ? modelData.effect : ""
     readonly property string paramKey: modelData && modelData.key ? modelData.key : ""
     readonly property var spec: row.isParam ? Model.paramFor(row.paramKey) : null
-    readonly property bool isCurrent: !row.isParam && root.running && root.state.effect === effect
+    readonly property bool isCurrent: !row.isParam && !row.isHint && root.running && root.state.effect === effect
 
     // First row of a new kind. Drawn inside the row rather than between rows so
     // grouping costs no height in a panel that is already tall.
     readonly property bool startsGroup: index > 0
       && root.rows[index - 1] && root.rows[index - 1].kind !== modelData.kind
+      // The hint stands in for an effect, so it belongs with them.
+      && !(row.isHint && root.rows[index - 1].kind === "effect")
 
     width: parent ? parent.width : 0
-    height: root.rowHeight
-    hasCursor: root.cursorActive && root.selectedIndex === index
+    // A hint is a row and a line of explanation, so it is taller than the rest.
+    height: row.isHint ? root.rowHeight - Style.space(4) + hintDetail.implicitHeight + Style.space(6)
+                       : root.rowHeight
+    hasCursor: !row.isHint && root.cursorActive && root.selectedIndex === index
     foreground: root.contentForeground
     accent: Color.accent
     fill: root.hoverFill
@@ -247,6 +258,8 @@ Panel {
 
     MouseArea {
       anchors.fill: parent
+      // Nothing to hover or click on a hint, and the pointer should not say so.
+      enabled: !row.isHint
       hoverEnabled: true
       cursorShape: Qt.PointingHandCursor
 
@@ -281,18 +294,38 @@ Panel {
       id: rowLabel
       anchors.left: marker.right
       anchors.leftMargin: Style.space(4)
-      anchors.verticalCenter: parent.verticalCenter
+      anchors.verticalCenter: row.isHint ? undefined : parent.verticalCenter
+      y: row.isHint ? Math.round((root.rowHeight - height) / 2) : 0
       textFormat: Text.PlainText
-      text: row.isParam ? (row.spec ? row.spec.label : row.paramKey)
+      text: row.isHint ? (row.hintSpec ? row.hintSpec.label : "")
+          : row.isParam ? (row.spec ? row.spec.label : row.paramKey)
           : row.isChoice ? (row.choiceSpec ? row.choiceSpec.label : row.paramKey)
           : row.isToggle ? (row.toggleSpec ? row.toggleSpec.label : row.paramKey)
           : row.effect === "none" ? "No effect"
           : row.effect === "blur" ? "Blur background"
           : "Replace background"
-      color: root.contentForeground
+      // Dimmed like anything unavailable: it is not a choice yet.
+      color: row.isHint ? root.dim : root.contentForeground
       font.family: root.contentFontFamily
       font.pixelSize: Style.font.body
       elide: Text.ElideRight
+    }
+
+    // How to make the row real. Under the label rather than beside it: the
+    // instruction names a file and does not fit on one line of a narrow panel.
+    Text {
+      id: hintDetail
+      visible: row.isHint
+      anchors.left: rowLabel.left
+      anchors.right: parent.right
+      anchors.rightMargin: Style.space(8)
+      y: root.rowHeight - Style.space(4)
+      textFormat: Text.PlainText
+      text: row.hintSpec ? row.hintSpec.detail : ""
+      color: root.dim
+      font.family: root.contentFontFamily
+      font.pixelSize: Style.font.caption
+      wrapMode: Text.WordWrap
     }
 
     // The value. Sliders get arrows on the selected row so it is discoverable

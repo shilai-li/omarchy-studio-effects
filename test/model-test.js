@@ -158,8 +158,8 @@ check("only settings the current effect uses are offered", () => {
   const all = '"blur":12,"passes":2,"dim":0,"desat":0'
   const kinds = json => M.panelRows(M.parseStatus(json)).map(r => r.kind + ":" + (r.effect || r.key))
 
-  // Nothing to adjust when effects are off.
-  eq(kinds('{"effect":"none",' + all + '}'), ["effect:none", "effect:blur"])
+  // Nothing to adjust when effects are off. (And no image, so the replace hint.)
+  eq(kinds('{"effect":"none",' + all + '}'), ["effect:none", "effect:blur", "hint:replace"])
 
   // Replace has no blur to soften, so no blur or smoothness rows.
   const rep = kinds('{"effect":"replace","background":true,' + all + '}')
@@ -440,6 +440,50 @@ check("the tooltip says so when the daemon is not installed", () => {
   // flash "not installed" at somebody who has it.
   for (const i of ["yes", "unknown", undefined])
     ok(M.tooltipFor(M.notRunningState(), "off", i).indexOf("not installed") === -1, String(i))
+})
+
+// ---- The replace-background hint.
+
+check("without an image the replace row is a hint, right after the effects", () => {
+  const rows = M.panelRows(M.parseStatus('{"effect":"blur","blur":12,"background":false}'))
+  const kinds = rows.map(r => r.kind + ":" + (r.effect || r.key))
+  eq(kinds.slice(0, 3), ["effect:none", "effect:blur", "hint:replace"])
+  // Not a real effect: choosing it must never be able to send `effect replace`.
+  ok(rows.filter(r => r.kind === "effect").every(r => r.effect !== "replace"), "no replace effect row")
+})
+
+check("with an image there is the real row and no hint", () => {
+  const rows = M.panelRows(M.parseStatus('{"effect":"blur","blur":12,"background":true}'))
+  const kinds = rows.map(r => r.kind + ":" + (r.effect || r.key))
+  ok(kinds.indexOf("effect:replace") !== -1, "replace offered: " + kinds)
+  ok(kinds.indexOf("hint:replace") === -1, "and not also hinted: " + kinds)
+})
+
+check("no hint before the daemon has answered", () => {
+  // A panel with nothing running has nothing to say about images yet.
+  eq(M.panelRows(M.notRunningState()).filter(r => r.kind === "hint").length, 0)
+  eq(M.panelRows(M.unknownState("could not read")).filter(r => r.kind === "hint").length, 0)
+})
+
+check("the hint says how to fix it, and names the file it means", () => {
+  const h = M.hintFor("replace")
+  ok(h && h.label === "Replace background", "labelled as the row it stands in for")
+  ok(h.detail.indexOf("BACKGROUND=") !== -1 && h.detail.indexOf("studio-effects.conf") !== -1, h.detail)
+  eq(M.hintFor("nonsense"), null)
+})
+
+check("the cursor walks past hints and never lands on one", () => {
+  const rows = [{ kind: "effect" }, { kind: "effect" }, { kind: "hint" }, { kind: "toggle" }]
+  eq(M.isSelectable(rows[2]), false)
+  eq(M.isSelectable(rows[0]), true)
+  eq(M.isSelectable(null), false)
+  eq(M.nextSelectable(rows, 1, 1), 3, "down skips the hint")
+  eq(M.nextSelectable(rows, 3, -1), 1, "up skips it too")
+  eq(M.nextSelectable(rows, 3, 1), 0, "and wraps")
+  eq(M.nextSelectable(rows, 0, -1), 3, "backwards over the top")
+  // Nothing selectable at all: stay where you are rather than loop forever.
+  eq(M.nextSelectable([{ kind: "hint" }, { kind: "hint" }], 0, 1), 0)
+  eq(M.nextSelectable([], 0, 1), 0)
 })
 
 if (failures.length) {

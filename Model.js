@@ -290,6 +290,15 @@ function panelRows(state) {
     for (var i = 0; i < effects.length; i++)
         rows.push({ kind: "effect", effect: effects[i], key: "" });
 
+    // "Replace background" is not offered without an image, because an effect the
+    // daemon would refuse is worse than none -- but hiding it with no word said
+    // left a new install with no way to learn it exists, and a missing row reads
+    // as a missing feature. So it is shown as what it is: a row that is not
+    // there yet, with how to make it so. Only for a daemon that answered, or the
+    // hint would appear on a panel that has nothing to say about images yet.
+    if (state && state.ok && !state.background)
+        rows.push({ kind: "hint", effect: "", key: "replace" });
+
     var supports = state && state.supports ? state.supports : {};
 
     // Framing is independent of the background effect -- keeping someone
@@ -316,6 +325,35 @@ function panelRows(state) {
         rows.push({ kind: "param", effect: "", key: PARAMS[j].key });
     }
     return rows;
+}
+
+// What each hint row says. Kept here so the wording is one string that a test can
+// hold to the file it names, and not something to get wrong in two places.
+var HINTS = {
+    replace: {
+        label: "Replace background",
+        detail: "Not set up. Put BACKGROUND=/path/to/image.jpg in "
+              + "~/.config/studio-effects.conf, then turn the camera off and on."
+    }
+};
+
+function hintFor(key) { return HINTS.hasOwnProperty(key) ? HINTS[key] : null; }
+
+// A hint is something to read, not something to choose: the cursor walks past it
+// and enter does nothing on it.
+function isSelectable(row) { return !!row && row.kind !== "hint"; }
+
+// The next row the cursor may land on, `direction` steps from `from`, wrapping.
+// Stays put if nothing at all can be selected.
+function nextSelectable(rows, from, direction) {
+    var n = rows.length;
+    if (n === 0) return 0;
+    var at = from;
+    for (var i = 0; i < n; i++) {
+        at = ((at + direction) % n + n) % n;
+        if (isSelectable(rows[at])) return at;
+    }
+    return from;
 }
 
 function stepParam(state, key, direction) {
@@ -573,6 +611,10 @@ if (typeof module !== "undefined" && module.exports) {
         toggleCommand: toggleCommand,
         toggleValue: toggleValue,
         panelRows: panelRows,
+        HINTS: HINTS,
+        hintFor: hintFor,
+        isSelectable: isSelectable,
+        nextSelectable: nextSelectable,
         stepParam: stepParam,
         indexOfEffect: indexOfEffect,
         stepBlur: stepBlur
