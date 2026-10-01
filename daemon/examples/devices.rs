@@ -6,7 +6,8 @@
 //! inferences, and reports the device, the time, and how far its mask is from
 //! the CPU's on the same input -- FP16 on an NPU is not bit-identical to FP32
 //! on a CPU, and a fallback should look the same, not merely run. Needs no
-//! camera. A device the machine lacks is reported as absent rather than failing
+//! camera. Each row also says what holding 30 fps costs in CPU, since that, and
+//! not speed, is what decides whether effects can stay on: see AGENTS.md. A device the machine lacks is reported as absent rather than failing
 //! the run, which is the same thing the daemon does when it falls back down the
 //! chain.
 //!
@@ -20,9 +21,16 @@
 //! where the file is one raw NV12 frame, for instance from
 //! `gst-launch-1.0 v4l2src num-buffers=30 ! ... ! filesink` -- take the last.
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use studio_effects_daemon::nv12::{write_model_input, NET};
 use studio_effects_daemon::segmenter::Segmenter;
+
+/// utime + stime for this whole process, in seconds. USER_HZ is 100.
+fn cpu_seconds() -> f64 {
+    let stat = std::fs::read_to_string("/proc/self/stat").expect("reading /proc/self/stat");
+    let f: Vec<&str> = stat.rsplit_once(')').expect("a stat line").1.split_whitespace().collect();
+    (f[11].parse::<f64>().unwrap() + f[12].parse::<f64>().unwrap()) / 100.0
+}
 
 /// One raw NV12 frame and its size, from the command line.
 fn frame_from_args() -> Option<(Vec<u8>, usize, usize)> {
@@ -89,6 +97,20 @@ fn main() {
                 last = mask.to_vec();
             }
             ms.sort_by(|a, b| a.total_cmp(b));
+
+            // Three seconds at a camera's cadence: sleeping between frames, as the
+            // daemon does, so a plugin that spins while it waits is charged for it.
+            let (cpu0, start) = (cpu_seconds(), Instant::now());
+            let mut frames = 0;
+            while start.elapsed() < Duration::from_secs(3) {
+                seg.infer().expect("inference");
+                frames += 1;
+                let due = Duration::from_secs_f64(frames as f64 / 30.0);
+                if let Some(wait) = due.checked_sub(start.elapsed()) {
+                    std::thread::sleep(wait);
+                }
+            }
+            let cost = 1e3 * (cpu_seconds() - cpu0) / frames as f64;
             let mean = last.iter().sum::<f32>() / last.len() as f32;
             let vs_cpu = match &reference {
                 Some(cpu) => {
@@ -98,7 +120,11 @@ fn main() {
                 }
                 None => String::new(),
             };
-            println!("{model:13} {device}: ok, {:.2} ms median, mask mean {mean:.3}{vs_cpu}", ms[ms.len() / 2]);
+            println!(
+                "{model:13} {:<17} ok, {:5.2} ms median, {cost:5.1} ms CPU per frame at 30 fps, mask mean {mean:.3}{vs_cpu}",
+                format!("{}:", seg.describe()),
+                ms[ms.len() / 2]
+            );
             if reference.is_none() {
                 reference = Some(last);
             }

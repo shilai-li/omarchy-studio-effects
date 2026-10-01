@@ -376,7 +376,7 @@ fn main() -> Result<()> {
     let models = installed_models();
     let mut loaded = args.model.trim_end_matches(".xml").rsplit('/').next().unwrap_or("segmentation").to_string();
     let mut seg = segmenter::Segmenter::new(&resolve_model(&loaded), &args.cache, args.device.as_deref())?;
-    println!("segmenting on {} with the {} model", seg.device, seg.model);
+    println!("segmenting on {} with the {} model", seg.describe(), seg.model);
 
     // What the camera can do decides what is asked of it. A size and a rate
     // from the config are a ceiling to pick under, and zero means "whatever it
@@ -693,7 +693,7 @@ fn main() -> Result<()> {
         if wanted_model != loaded {
             match segmenter::Segmenter::new(&resolve_model(&wanted_model), &args.cache, args.device.as_deref()) {
                 Ok(other) => {
-                    println!("switched to the {} model on {}", other.model, other.device);
+                    println!("switched to the {} model on {}", other.model, other.describe());
                     seg = other;
                     loaded = wanted_model;
                 }

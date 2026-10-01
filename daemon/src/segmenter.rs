@@ -1,7 +1,10 @@
 //! Model loading, device selection and one inference per frame.
 
 use anyhow::{Context, Result};
-use openvino::{Core, DeviceType, ElementType, InferRequest, RwPropertyKey, Shape, Tensor};
+use openvino::{Core, DeviceType, ElementType, InferRequest, Model, RwPropertyKey, Shape, Tensor};
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
+use std::time::Instant;
 
 use crate::nv12::NET;
 
@@ -30,6 +33,9 @@ pub struct Segmenter {
     mask: Vec<f32>,
     pub device: String,
     pub model: String,
+    /// How many threads the CPU plugin was held to. `None` on any other device,
+    /// where the question does not arise.
+    pub threads: Option<usize>,
 }
 
 /// The devices to try, best first, saying out loud what was found and why.
@@ -145,6 +151,40 @@ impl Segmenter {
             .filter_map(|n| n.get_name().ok())
             .collect();
         let recurrent = inputs.iter().any(|n| n == "r1i");
+        let spec = Spec { recurrent, inputs, device };
+
+        // The CPU plugin left alone spreads one 256x256 inference across every
+        // thread and spins them between frames. Measured on an i5-8250U
+        // holding 30 fps, segmentation cost 10.7 ms of CPU a frame that way and
+        // 4.2 on one thread, with latency still a fifth of the frame; matting
+        // cost 37 ms -- 111% of a core -- and 27 on two threads, with room to
+        // spare. So the CPU is held to as few threads as keep up.
+        if spec.device == "CPU" {
+            let threads = match cached_threads(model_xml) {
+                Some(n) => n,
+                None => {
+                    let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
+                    let n = pick_threads(&cpu_candidates(cores), CPU_BUDGET_MS, |n| {
+                        core.set_property(&device_type, &RwPropertyKey::InferenceNumThreads, &n.to_string())
+                            .context("setting the CPU thread count")?;
+                        Self::assemble(&mut core, &model, &spec, Some(n))?.probe()
+                    })?;
+                    remember_threads(model_xml, n);
+                    n
+                }
+            };
+            core.set_property(&device_type, &RwPropertyKey::InferenceNumThreads, &threads.to_string())
+                .context("setting the CPU thread count")?;
+            return Self::assemble(&mut core, &model, &spec, Some(threads));
+        }
+        Self::assemble(&mut core, &model, &spec, None)
+    }
+
+    /// Compile for the device and build everything an inference needs.
+    fn assemble(core: &mut Core, model: &Model, spec: &Spec, threads: Option<usize>) -> Result<Self> {
+        let Spec { recurrent, inputs, device } = spec;
+        let (recurrent, device) = (*recurrent, device.clone());
+        let device_type: DeviceType = device.parse().expect("DeviceType parsing is infallible");
 
         // A compiler that aborts -- the NPU's did, on a model with a dynamic
         // shape, with "LLVM ERROR: Failed to infer result type(s)" -- takes the
@@ -158,7 +198,7 @@ impl Segmenter {
             }
             let _ = std::fs::write(path, b"");
         }
-        let compiled = core.compile_model(&model, device_type);
+        let compiled = core.compile_model(model, device_type);
         // Gone whichever way it went: an `Err` is a refusal the caller handles,
         // not a crash.
         if let Some(path) = &crumb {
@@ -211,7 +251,37 @@ impl Segmenter {
             mask: vec![0.0; NET * NET],
             device,
             model: if recurrent { "matting".into() } else { "segmentation".into() },
+            threads,
         })
+    }
+
+    /// How long one inference takes, in milliseconds, on an empty frame.
+    ///
+    /// The median of a handful after two to warm up: the first calls carry
+    /// allocation, and one slow outlier on a busy machine should not decide the
+    /// thread count. Content does not change the cost of a convolution, so a
+    /// black frame is as good as a face.
+    fn probe(mut self) -> Result<f64> {
+        self.input_buffer()?.fill(0.0);
+        for _ in 0..2 {
+            self.infer()?;
+        }
+        let mut ms = Vec::with_capacity(PROBE_FRAMES);
+        for _ in 0..PROBE_FRAMES {
+            let t = Instant::now();
+            self.infer()?;
+            ms.push(t.elapsed().as_secs_f64() * 1e3);
+        }
+        ms.sort_by(|a, b| a.total_cmp(b));
+        Ok(ms[ms.len() / 2])
+    }
+
+    /// The device, and the thread count where one was chosen: "CPU (2 threads)".
+    pub fn describe(&self) -> String {
+        match self.threads {
+            Some(n) => format!("{} ({n} thread{})", self.device, if n == 1 { "" } else { "s" }),
+            None => self.device.clone(),
+        }
     }
 
     /// Borrow the input tensor's buffer to write the next frame into.
@@ -246,6 +316,70 @@ impl Segmenter {
             self.request.set_tensor(&state.input, &state.tensor)?;
         }
         Ok(&self.mask)
+    }
+}
+
+/// What a model needs to be built on a device, gathered once.
+struct Spec {
+    recurrent: bool,
+    inputs: Vec<String>,
+    device: String,
+}
+
+/// The longest one inference may take on the CPU, in milliseconds: 60% of a
+/// 30 fps frame. The rest of the frame is the camera's decode, the blur and the
+/// blend, and a model that uses more than this leaves them no room.
+const CPU_BUDGET_MS: f64 = 20.0;
+
+/// Inferences timed per thread count.
+const PROBE_FRAMES: usize = 6;
+
+/// Thread counts worth trying, fewest first, on a machine with `cores`.
+fn cpu_candidates(cores: usize) -> Vec<usize> {
+    let mut found: Vec<usize> = [1, 2, 4].into_iter().filter(|&n| n <= cores).collect();
+    // A machine with more than four threads gets the rest as a last resort.
+    if cores > 4 {
+        found.push(cores);
+    }
+    found
+}
+
+/// The fewest threads whose latency fits the budget; failing that, the thread
+/// count that was fastest -- a CPU too slow for the budget still has to run.
+///
+/// Fewest first because that is the cheap one: each thread added buys less
+/// latency than the last and costs a whole thread's spin-waiting, so the first
+/// count that keeps up is the one that costs least. `latency` is called in
+/// order and stops being called at the first that fits.
+fn pick_threads(candidates: &[usize], budget_ms: f64, mut latency: impl FnMut(usize) -> Result<f64>) -> Result<usize> {
+    let mut best: Option<(usize, f64)> = None;
+    for &n in candidates {
+        let ms = latency(n)?;
+        if ms <= budget_ms {
+            return Ok(n);
+        }
+        if best.is_none_or(|(_, b)| ms < b) {
+            best = Some((n, ms));
+        }
+    }
+    best.map(|(n, _)| n).context("no thread count to try")
+}
+
+/// What was chosen for each model this run. Switching models is something a
+/// person does a few times while comparing them, and measuring again each time
+/// would stall the frame loop for a quarter of a second to learn the same thing.
+fn chosen() -> &'static Mutex<HashMap<String, usize>> {
+    static CHOSEN: OnceLock<Mutex<HashMap<String, usize>>> = OnceLock::new();
+    CHOSEN.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn cached_threads(model_xml: &str) -> Option<usize> {
+    chosen().lock().ok()?.get(model_xml).copied()
+}
+
+fn remember_threads(model_xml: &str, threads: usize) {
+    if let Ok(mut map) = chosen().lock() {
+        map.insert(model_xml.to_string(), threads);
     }
 }
 
@@ -341,6 +475,53 @@ mod tests {
         };
         assert!(e.contains("no device could run"), "{e}");
         assert!(e.contains("CPU could not run"), "CPU is always there and always tried: {e}");
+    }
+
+    /// The cheap count is the smallest one that keeps up, and nothing larger is
+    /// even measured once one does.
+    #[test]
+    fn the_fewest_threads_that_keep_up_win() {
+        let mut asked = Vec::new();
+        let n = pick_threads(&[1, 2, 4], 20.0, |n| {
+            asked.push(n);
+            Ok([4.2, 2.9, 2.2][n.trailing_zeros() as usize])
+        })
+        .unwrap();
+        assert_eq!(n, 1, "segmentation on an i5: one thread is already fast enough");
+        assert_eq!(asked, [1], "and the others are not even tried");
+    }
+
+    /// Matting on the same i5: one thread misses the budget at 42 ms, two make it.
+    #[test]
+    fn a_slower_model_gets_more_threads_only_as_needed() {
+        let n = pick_threads(&[1, 2, 4], 20.0, |n| Ok(match n { 1 => 42.0, 2 => 17.7, _ => 15.8 })).unwrap();
+        assert_eq!(n, 2);
+    }
+
+    /// A CPU too slow for the budget still has to run, on whatever was fastest.
+    #[test]
+    fn when_nothing_fits_the_fastest_is_used() {
+        let n = pick_threads(&[1, 2, 4], 20.0, |n| Ok(match n { 1 => 90.0, 2 => 50.0, _ => 41.0 })).unwrap();
+        assert_eq!(n, 4);
+        // Fewer threads can be faster than more, once the spinning costs more
+        // than the parallelism buys.
+        let n = pick_threads(&[1, 2, 4], 20.0, |n| Ok(match n { 1 => 30.0, 2 => 25.0, _ => 28.0 })).unwrap();
+        assert_eq!(n, 2);
+    }
+
+    #[test]
+    fn a_failed_measurement_is_an_error_not_a_guess() {
+        assert!(pick_threads(&[1, 2], 20.0, |_| anyhow::bail!("compile failed")).is_err());
+        assert!(pick_threads(&[], 20.0, |_| Ok(1.0)).is_err());
+    }
+
+    #[test]
+    fn candidates_never_exceed_the_machine() {
+        assert_eq!(cpu_candidates(1), [1]);
+        assert_eq!(cpu_candidates(2), [1, 2]);
+        assert_eq!(cpu_candidates(4), [1, 2, 4]);
+        assert_eq!(cpu_candidates(8), [1, 2, 4, 8], "a bigger machine gets everything as a last resort");
+        assert_eq!(cpu_candidates(16), [1, 2, 4, 16]);
     }
 
     #[test]
