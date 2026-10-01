@@ -65,6 +65,7 @@ daemon/examples/frame_cost.rs      each CPU stage of the frame loop, no camera n
 daemon/examples/devices.rs         every model on every device this machine has, compared
 packaging/               systemd units, PKGBUILD, example config
 packaging/setup.sh       what the widget opens in a terminal to build and install the daemon
+packaging/studio-effects-loopback-prepare   loads v4l2loopback without leaving its dummy device
 test/setup-test.sh       the setup script's dry run and its refusals, no sudo
 ```
 
@@ -920,6 +921,27 @@ Temporal smoothing is deliberately mild. It steadies edges while someone sits
 still, but it is a lag: turned up, it smears the silhouette behind anyone who
 moves, which is a worse version of the problem it was added to fix.
 
+**Loading v4l2loopback leaves a device behind, and it is not ours to leave.**
+`modprobe v4l2loopback` with no arguments creates one device of its own, "Dummy
+video device (0x0000)", and the unit then added Studio Camera beside it. On a
+machine where nothing else configures the module -- a second laptop, on a fresh
+install, was where it showed -- every application listed a useless second camera
+between the real one and ours. It does not show on the machine this was written
+on, because Omarchy's camera setup loads the same module first with options of
+its own, which is also why it went unseen.
+
+The obvious fix, `devices=0`, is wrong, and the reason is the whole design of
+`studio-effects-loopback-prepare`. Both units load one module and whichever goes
+first decides its options; a `devices=0` that won the race on a machine with
+Omarchy's MIPI camera would leave the built-in camera with no device at all. So
+the helper changes nothing about how the module loads. It acts only when it is
+the one that loaded it, removes only the one device the module makes by default,
+and only if nothing has it open; a vendor camera, Studio Camera and anything open
+are never touched. An existing install has the module loaded already, so the
+package's upgrade hook runs `--remove-stray` as well. `test/loopback-prepare-test.sh`
+holds each of those to a made-up /sys, since the cases that matter are the ones
+where deleting a device would be wrong.
+
 **The first run: the widget asks, a terminal does.** The intended flow is
 `omarchy plugin add`, then the panel offers to build and install the daemon. The
 installer will not: it clones files and runs nothing, so a fresh plugin has no
@@ -1024,6 +1046,7 @@ ldd daemon/target/release/studio-effects-daemon | grep openvino_c
 omarchy plugin validate .           # manifest + entry points
 bash test/model-test.sh             # Model.js under plain node, no compositor
 bash test/setup-test.sh             # the setup script: dry run, and the layouts it refuses
+bash test/loopback-prepare-test.sh  # the loopback helper, against a made-up /sys
 bash test/voice-check.sh            # does Voice Focus pass your voice? (talk into it)
 
 # Reinstall AND restart, in that order. Reinstalling alone leaves the running

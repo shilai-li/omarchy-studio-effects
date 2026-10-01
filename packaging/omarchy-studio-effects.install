@@ -21,6 +21,10 @@ post_install() {
 }
 
 post_upgrade() {
+    # An install from before the helper existed already has the module loaded and
+    # its default device in place, so the normal route -- which only acts when it
+    # does the loading -- would never remove it.
+    /usr/lib/studio-effects/loopback-prepare --remove-stray || true
     post_install
 }
 

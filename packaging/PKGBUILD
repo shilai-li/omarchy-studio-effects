@@ -107,6 +107,8 @@ package() {
                  "$pkgdir/usr/share/studio-effects/voice-focus.conf"
   install -Dm755 packaging/studio-effects-voice-default \
                  "$pkgdir/usr/lib/studio-effects/voice-default"
+  install -Dm755 packaging/studio-effects-loopback-prepare \
+                 "$pkgdir/usr/lib/studio-effects/loopback-prepare"
 
   install -Dm644 packaging/studio-effects.conf.example \
                  "$pkgdir/usr/share/studio-effects/studio-effects.conf.example"

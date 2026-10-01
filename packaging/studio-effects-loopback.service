@@ -18,7 +18,10 @@ After=systemd-modules-load.service
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStartPre=/usr/bin/modprobe v4l2loopback
+# Loads the module without leaving its default "Dummy video device" behind, which
+# would otherwise sit in every application's camera list beside Studio Camera.
+# See the helper for why it does not simply load with devices=0.
+ExecStartPre=/usr/lib/studio-effects/loopback-prepare
 # Idempotent: re-running must not stack up a second Studio Camera.
 ExecStart=/usr/bin/bash -c '\
   grep -qFx "Studio Camera" /sys/class/video4linux/*/name 2>/dev/null && exit 0; \
