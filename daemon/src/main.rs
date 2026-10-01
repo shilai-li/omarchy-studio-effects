@@ -45,11 +45,26 @@ struct Args {
     height: u32,
 
     /// The most frames a second to ask for. A ceiling, not a demand: the camera
-    /// runs at the fastest rate it offers at or under this, so the default of
-    /// 60 gives 60 on a camera that has it and 30 on one that does not, where
+    /// runs at the fastest rate it offers at or under this, so a ceiling of 60
+    /// gives 60 on a camera that has it and 30 on one that does not, where
     /// insisting on 60 would refuse to open the second.
-    #[arg(long, default_value_t = 60)]
+    ///
+    /// Zero, the default, picks for the machine: 60 where the model runs on an
+    /// NPU or GPU, 30 where it runs on the CPU alone.
+    #[arg(long, default_value_t = 0)]
     fps: u32,
+
+    /// Ask the camera to keep its frame rate: on or off.
+    ///
+    /// Many webcams stretch their exposure in dim light and silently drop to
+    /// 8-10 fps, which reaches a call as a slideshow whatever the software does.
+    /// Holding the rate trades that for a darker, noisier picture. The setting
+    /// lasts until the camera is replugged, so it outlives the daemon, and a
+    /// camera without the control ignores it. Takes a value for the same reason
+    /// `--framing` does: a unit cannot omit an argument.
+    #[arg(long, default_value = "on", value_parser = parse_switch,
+          action = clap::ArgAction::Set)]
+    hold_framerate: bool,
 
     /// Capture from the camera at this size and publish at --width/--height.
     ///
@@ -387,14 +402,28 @@ fn main() -> Result<()> {
         eprintln!("could not ask {input} what it can do ({e:#}); assuming 1280x720 at 30 fps");
         Vec::new()
     });
+    // What is affordable depends on where the model runs, so the defaults do
+    // too: see camera::ceiling. Anything the config sets wins over them.
+    let on_cpu = seg.device == "CPU";
+    let (auto_w, auto_h, auto_fps) = camera::ceiling(on_cpu);
+    let max_fps = if args.fps == 0 { auto_fps } else { args.fps };
     let auto = args.width == 0 || args.height == 0;
-    let (want_w, want_h) = if auto { (1920, 1080) } else { (args.width, args.height) };
-    let out_mode = camera::pick(&modes, want_w, want_h, args.fps);
+    if on_cpu && (auto || args.fps == 0) {
+        println!(
+            "running on the CPU alone: asking the camera for at most {}x{} at {} fps unless the \
+             config says otherwise (WIDTH, HEIGHT, FPS)",
+            if auto { auto_w } else { args.width },
+            if auto { auto_h } else { args.height },
+            max_fps
+        );
+    }
+    let (want_w, want_h) = if auto { (auto_w, auto_h) } else { (args.width, args.height) };
+    let out_mode = camera::pick(&modes, want_w, want_h, max_fps);
 
     // Capture bigger than the output only when asked to, for framing's sake.
     let capture_asked = args.capture_width != 0 && args.capture_height != 0;
     let cap_mode = if capture_asked {
-        camera::pick(&modes, args.capture_width, args.capture_height, args.fps)
+        camera::pick(&modes, args.capture_width, args.capture_height, max_fps)
     } else {
         out_mode
     };
@@ -405,7 +434,7 @@ fn main() -> Result<()> {
         media: camera::Media::Jpeg,
         width: if auto { 1280 } else { args.width },
         height: if auto { 720 } else { args.height },
-        rate: (args.fps.min(30) as i32, 1),
+        rate: (max_fps.min(30) as i32, 1),
     };
     let cap = cap_mode.unwrap_or(fallback);
     let (cap_w, cap_h) = (cap.width, cap.height);
@@ -443,8 +472,15 @@ fn main() -> Result<()> {
              image/jpeg,width={cap_w},height={cap_h},framerate={fps_text};image/jpeg;video/x-raw"
         )
     };
+    // Quoted because the value holds commas; a source without the control skips
+    // it without a word, so it is safe to offer to every camera.
+    let hold = if args.hold_framerate {
+        format!(" extra-controls=\"{}\"", camera::HOLD_FRAMERATE)
+    } else {
+        String::new()
+    };
     let src = format!(
-        "v4l2src name=camera device={input} ! {wanted} ! decodebin ! videoconvert ! videoscale \
+        "v4l2src name=camera device={input}{hold} ! {wanted} ! decodebin ! videoconvert ! videoscale \
          ! video/x-raw,format=NV12,width={cap_w},height={cap_h},framerate={fps_text} \
          ! appsink name=sink max-buffers=2 drop=true sync=false",
     );

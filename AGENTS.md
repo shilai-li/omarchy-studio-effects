@@ -845,13 +845,41 @@ Asking for a size and a rate the camera may not have is the other half of that
 mistake, and it is why nothing here is a fixed default. `camera.rs` reads the
 camera's modes -- `v4l2src` taken to READY, which starts nothing and leaves the
 recording light off, then its caps queried -- and `pick` chooses under a ceiling:
-the biggest size that fits under `WIDTH` x `HEIGHT` (zero means 1920x1080), the
-highest rate at or under `FPS` (60), raw over MJPEG at a tie. `FPS=60` is a
-ceiling and not a demand: this camera has no 60 and a hard 60 fails to
-negotiate, so a default of 60 that meant "exactly" would refuse to open on most
-machines. A size the camera lacks is held to what it has -- 4K asks get 1080p,
+the biggest size that fits under `WIDTH` x `HEIGHT`, the highest rate at or
+under `FPS`, raw over MJPEG at a tie. `FPS` is a ceiling and not a demand: this
+camera has no 60 and a hard 60 fails to negotiate, so a 60 that meant "exactly"
+would refuse to open on most machines. A size the camera lacks is held to what it has -- 4K asks get 1080p,
 1024x576 gets 960x540 -- and never scaled up to, and a 4:3 camera stays 4:3
 rather than being stretched.
+
+**What zero means depends on where the model runs.** `WIDTH`, `HEIGHT` and `FPS`
+default to 0, and `camera::ceiling` turns that into 1920x1080 at up to 60 where
+the model is on an NPU or GPU and 1280x720 at up to 30 on the CPU alone. The
+defaults must not be tuned for the best machine: on the CPU, 1080p is 2.25 times
+the pixels to decode, blur and blend, a 60 fps camera doubles every per-frame cost
+while halving the time to do it in, and the CPU thread picker above assumes a
+30 fps frame. A 2017 i5 on battery held 30 fps at 720p with the frame loop half
+idle -- 17 ms of 33 -- which is the point to aim for. The segmenter is built
+before the camera is probed for exactly this reason. Anything set in the config
+wins, and the daemon says when it has applied the CPU ceiling.
+
+**The camera is asked to keep its frame rate, and that is not a CPU problem.**
+Webcams commonly stretch their exposure in dim light and silently drop to 8-10
+fps (`exposure_dynamic_framerate`, on by default). It looked like the daemon
+being slow -- the output was 8.0 fps at 46% of a core -- and turning the control
+off gave 30.8 fps; the same camera with it left on gave 14.9 fps on this machine in
+the same room. So the daemon sets it off through `v4l2src`'s own `extra-controls`,
+which a camera without the control skips silently (checked: exit 0, nothing
+printed), so it is offered to every source. Two things follow. It is **not
+restored**: the setting lasts until the camera is replugged, so it outlives the
+daemon, and `HOLD_FRAMERATE=off` is the way to leave the camera alone. And it
+trades a slideshow for a darker, noisier picture, which is the better way round
+for a call and the worse one for a photograph. It takes a value (`on`/`off`) like
+`--framing`, because a unit cannot omit an argument.
+
+When testing it, set the control to a known value first and say what you found it
+as. A check that starts from the value it is trying to produce proves nothing, and
+"restoring" a camera to what you assumed it was is how it ends up changed.
 
 A mode slower than 15 fps loses to a usable smaller one, because cameras offer
 uncompressed 1080p at 3-5 fps beside their real modes and the size alone must

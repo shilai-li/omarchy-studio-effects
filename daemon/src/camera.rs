@@ -64,6 +64,34 @@ pub fn probe(device: &str) -> Result<Vec<Mode>> {
     Ok(caps.map(|c| modes_from_caps(&c)).unwrap_or_default())
 }
 
+/// The largest picture and the fastest rate to ask a camera for, when nothing
+/// was configured: `(width, height, fps)`.
+///
+/// What a machine can carry depends on where the model runs, and the defaults
+/// should not be tuned for the best machine. On an NPU or GPU the CPU is left
+/// for the call, and 1080p at up to 60 is affordable. On the CPU alone, 1080p is
+/// 2.25 times the pixels to decode, blur and blend, and a 60 fps camera doubles
+/// every per-frame cost again while halving the time to do it in -- and the
+/// thread count the CPU path picks assumes a 30 fps frame. A 2017 i5 on battery
+/// held 30 fps at 720p with the frame loop half idle, which is the point to aim
+/// for. Anything set in the config overrides this.
+pub fn ceiling(on_cpu: bool) -> (u32, u32, u32) {
+    if on_cpu { (1280, 720, 30) } else { (1920, 1080, 60) }
+}
+
+/// What to hand `v4l2src` so the camera keeps its frame rate.
+///
+/// Many webcams stretch their exposure in dim light and silently drop to 8-10
+/// fps -- `exposure_dynamic_framerate`, on by default -- whatever the software
+/// does, and what reaches the call is a slideshow. Turning it off trades that
+/// for a darker, noisier picture, which is the better way round for a video call.
+///
+/// Through GStreamer's own `extra-controls` because a camera without the control
+/// ignores it silently (checked: exit 0, nothing printed), which Omarchy's relay
+/// and most other sources are. The setting lasts until the camera is replugged,
+/// so it outlives the daemon; `HOLD_FRAMERATE=off` is the way not to.
+pub const HOLD_FRAMERATE: &str = "controls,exposure_dynamic_framerate=0";
+
 /// The modes a caps describes: one per size and rate, for the two kinds this
 /// daemon can decode.
 ///
@@ -340,6 +368,44 @@ mod tests {
         modes.extend([raw(1280, 720, 10), raw(640, 480, 30), raw(320, 240, 30), raw(160, 120, 30)]);
         assert_eq!(pick(&modes, 1920, 1080, 60), Some(jpeg(1280, 720, 30)));
         assert_eq!(pick(&modes, 640, 480, 60), Some(raw(640, 480, 30)), "4:3 when 4:3 is asked for");
+    }
+
+    /// Where the model runs decides what is affordable by default.
+    #[test]
+    fn the_cpu_gets_a_smaller_default_than_an_accelerator() {
+        assert_eq!(ceiling(false), (1920, 1080, 60));
+        assert_eq!(ceiling(true), (1280, 720, 30));
+    }
+
+    /// On the i5 that prompted this: a camera that offers 1080p30 is held to 720p
+    /// when the model runs on the CPU, and gets 1080p when it does not.
+    #[test]
+    fn a_1080p_camera_is_held_to_720p_on_the_cpu_only() {
+        let camera = [jpeg(1920, 1080, 30), jpeg(1280, 720, 30), jpeg(640, 480, 30)];
+        let (w, h, fps) = ceiling(true);
+        assert_eq!(pick(&camera, w, h, fps), Some(jpeg(1280, 720, 30)));
+        let (w, h, fps) = ceiling(false);
+        assert_eq!(pick(&camera, w, h, fps), Some(jpeg(1920, 1080, 30)));
+    }
+
+    /// A 60 fps camera on the CPU is held to 30: the cost per frame is the same
+    /// and the time to do it in is half.
+    #[test]
+    fn a_60fps_camera_is_held_to_30_on_the_cpu() {
+        let camera = [jpeg(1280, 720, 60), jpeg(1280, 720, 30)];
+        let (w, h, fps) = ceiling(true);
+        assert_eq!(pick(&camera, w, h, fps), Some(jpeg(1280, 720, 30)));
+        let (w, h, fps) = ceiling(false);
+        assert_eq!(pick(&camera, w, h, fps), Some(jpeg(1280, 720, 60)));
+    }
+
+    /// The control is named exactly as v4l2 does, and as a GStreamer structure.
+    #[test]
+    fn the_frame_rate_control_is_a_valid_structure() {
+        gst::init().unwrap();
+        let s = gst::Structure::from_str(HOLD_FRAMERATE).expect("a structure");
+        assert_eq!(s.name(), "controls");
+        assert_eq!(s.get::<i32>("exposure_dynamic_framerate").unwrap(), 0);
     }
 
     #[test]

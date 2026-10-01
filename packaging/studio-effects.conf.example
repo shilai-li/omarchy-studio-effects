@@ -11,17 +11,28 @@
 # numbers move between boots. `studio-effects-daemon --list-devices` prints both.
 INPUT=/dev/video0
 
-# What applications receive, and how fast. Zero, the default, asks the camera:
-# its biggest mode up to 1920x1080, at the fastest rate it offers up to FPS. A
-# camera with no 1080p gets its own best, and is not stretched to fit; one with
-# no 60 fps runs at 30, and one with 60 runs at 60. Set WIDTH and HEIGHT only to
-# hold the picture smaller than the camera could give -- 1280x720 is what most
-# calls transmit and is cheaper -- and FPS as the ceiling on the rate. The
-# daemon says what it got, once, at the top of the journal:
-#     camera delivers image/jpeg 1920x1080 at 30/1 fps
+# What applications receive, and how fast. Zero, the default, picks for the
+# machine and then asks the camera what it has:
+#
+#   NPU or GPU   the biggest mode up to 1920x1080, at up to 60 fps
+#   CPU alone    the biggest mode up to 1280x720, at up to 30 fps -- what a
+#                laptop without an NPU can carry with the camera on all day
+#
+# A camera with no mode that large gets its own best and is not stretched to fit;
+# one with no 60 fps runs at 30. Set WIDTH and HEIGHT to ask for something else
+# (1920 and 1080 on a CPU-only machine that can afford it), and FPS as the
+# ceiling on the rate. The daemon says what it got, once, in the journal:
+#     camera delivers image/jpeg 1280x720 at 30/1 fps
 WIDTH=0
 HEIGHT=0
-FPS=60
+FPS=0
+
+# Ask the camera to keep its frame rate. Many webcams stretch their exposure in
+# dim light and quietly drop to 8-10 fps, which reaches a call as a slideshow;
+# holding the rate trades that for a darker, noisier picture. It lasts until the
+# camera is replugged, so it outlives the daemon, and a camera without the
+# control ignores it. Set to off to leave the camera alone.
+HOLD_FRAMERATE=on
 
 # What to capture from the camera, if larger than the output. Worth setting
 # with auto framing: the crop is taken from the captured frame and scaled to

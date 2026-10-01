@@ -338,10 +338,16 @@ pipeline gets measured on a machine with no spare loopback device. `--snapshot`
 writes one processed frame as a PNG, which is the only way to see what the
 composite looks like without one.
 
-The picture is whatever the camera offers, up to 1920x1080, at the fastest rate
-it has up to 60 fps -- 1080p at 30 on most laptop cameras. A camera without 1080p
-gets its own best mode and is not stretched to fit, and a machine without an
-NPU runs the same models on its GPU, or on the CPU, with the same result.
+The picture is whatever the camera offers, chosen for the machine. With an NPU or
+GPU that is up to 1920x1080 at up to 60 fps -- 1080p at 30 on most laptop
+cameras. On the CPU alone it is up to 1280x720 at 30, which is what a laptop
+without an NPU can carry. A camera without that size gets its own best mode and
+is not stretched to fit, and a machine without an NPU runs the same models on its
+GPU, or on the CPU, with the same result -- on as few CPU threads as keep up.
+
+The camera is also asked to keep its frame rate. Many webcams stretch their
+exposure in dim light and drop to 8-10 fps, which a call sees as a slideshow;
+the trade is a darker, noisier picture. `HOLD_FRAMERATE=off` turns that off.
 
 The frame loop's CPU work is 1.1 ms a frame at 720p and about 2 at 1080p (a
 P-core, blur at the default radius); with a USB camera the MJPEG decode on the

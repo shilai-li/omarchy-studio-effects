@@ -26,7 +26,8 @@ Type=simple
 Environment=INPUT=/dev/video0
 Environment=WIDTH=0
 Environment=HEIGHT=0
-Environment=FPS=60
+Environment=FPS=0
+Environment=HOLD_FRAMERATE=on
 Environment=CAPTURE_WIDTH=0
 Environment=CAPTURE_HEIGHT=0
 Environment=MODEL=segmentation
@@ -50,6 +51,7 @@ ExecStart=/usr/bin/studio-effects-daemon \
     --width ${WIDTH} \
     --height ${HEIGHT} \
     --fps ${FPS} \
+    --hold-framerate=${HOLD_FRAMERATE} \
     --capture-width ${CAPTURE_WIDTH} \
     --capture-height ${CAPTURE_HEIGHT} \
     --blur ${BLUR} \

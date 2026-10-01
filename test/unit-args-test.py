@@ -81,9 +81,16 @@ def main() -> None:
     if not failures:
         print("ok   every switch value a config file can produce is accepted")
 
+    # Every switch has to take a value, for the same reason: a unit cannot omit
+    # an argument, so a bare-flag switch is a restart loop in the service.
+    for value in ("on", "off", "true", "false", ""):
+        if not run([f"--hold-framerate={value}"])[0]:
+            failures.append(f"--hold-framerate={value!r} was rejected; a config file can produce it")
+
     # And a typo must be refused rather than silently meaning off.
-    if run(["--framing=banana"])[0]:
-        failures.append("--framing=banana was accepted; a typo would silently mean off")
+    for flag in ("--framing", "--hold-framerate"):
+        if run([f"{flag}=banana"])[0]:
+            failures.append(f"{flag}=banana was accepted; a typo would silently mean off")
 
     if failures:
         print(f"{len(failures)} failed\n")
