@@ -480,6 +480,43 @@ scene has nobody in it and every mask is zero. On this machine the NPU and GPU
 differ from the CPU by at most 0.026 in any pixel and 0.0001 on average, so a
 machine without an NPU gets the same picture, not merely a picture.
 
+**The CPU fallback is held to the threads it needs, and measures to find out.**
+Most machines are not this one. A 2017 laptop with an i5-8250U (4 cores, 8
+threads, no NPU, no GPU plugin installed) ran the whole thing on the CPU, which
+is the fallback working as designed -- and, until it was measured, at several
+times the cost it needed. The CPU plugin at its defaults spreads one 256x256
+inference across every thread and spins them between frames, which is the
+18.67 ms / 56% of a core the "CPU row is single-threaded on purpose" note above
+warns about when *benchmarking*; the daemon was doing it for real. Per frame, at
+a 30 fps cadence, on that i5:
+
+| model | threads | latency | CPU per frame | of a core |
+|---|---|---|---|---|
+| segmentation | default (all) | 2.2 ms | 10.7 ms | 32% |
+| segmentation | **1** | 4.2 ms | **4.2 ms** | **12%** |
+| segmentation | 2 | 2.9 ms | 6.4 ms | 19% |
+| matting | default (all) | 9.4 ms | 37.0 ms | **111%** |
+| matting | 1 | 42 ms, misses 30 fps | 22.7 ms | 54% |
+| matting | **2** | 17.7 ms | **26.8 ms** | **80%** |
+| matting | 4 | 15.8 ms | 37.1 ms | 111% |
+
+Each thread added buys less latency than the last and costs a whole thread of
+spinning, so the cheap count is the fewest that keeps up. `segmenter.rs` therefore
+times a few inferences at 1, 2 and 4 threads (and every thread, as a last resort
+on a bigger machine) and keeps the first that fits 20 ms -- 60% of a 30 fps frame,
+the rest being the camera's decode, the blur and the blend. A CPU too slow for
+that runs on whichever count was fastest. The choice is remembered per model for
+the run, so flipping models in the panel does not stall the frame loop. It
+chose 1 thread for segmentation and 2 for matting on that i5, which is what the
+table says by hand, and 4.0 and 26.1 ms of CPU per frame in `examples/devices.rs`.
+
+Two things to remember. A fixed thread count would have been wrong somewhere:
+matting needs two here and one is enough on a Core Ultra, which is why it
+measures. And the number to read is CPU per frame, not latency -- every device
+here clears 30 fps, and what separates them is what holding it costs (the NPU's
+0.4 ms against the CPU's 13, for matting, on this machine). `examples/devices.rs`
+prints it for every device.
+
 **NPU access is a permissions question, not a group question.** An earlier note
 here said the shipped unit should set `SupplementaryGroups=render`. That was
 wrong twice over, and the correction is worth keeping because the symptom --
