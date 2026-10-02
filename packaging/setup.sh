@@ -90,7 +90,7 @@ if [ "$method" = release ]; then
     url="https://github.com/shilai-li/omarchy-studio-effects/releases/download/v0.1.0/$package"
     # Pinned to the published SHA256SUMS; downloaded bytes cannot supply their
     # own expected checksum. Update these together when publishing a new binary.
-    checksum=4c3476db8ebc80044a2fa0a67f565bcf248cea3424c93b0dc6ed881e013138e9
+    checksum=dd6fa6937b04877816ec596ef0561008d29f030c6d922a43c2beea83e46e7017
     say "Install the v0.1.0 release (about 41 MB), verify its checksum, then run pacman."
     say "Installation asks for sudo and creates Studio Camera; camera and microphone stay off."
     if [ "$dry" -eq 1 ]; then
