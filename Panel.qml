@@ -42,12 +42,14 @@ Panel {
   // rather than flashing an install offer at somebody who has the daemon.
   readonly property bool notInstalled: host ? host.installed === "no" : false
   readonly property bool settingUp: host ? host.settingUp === true : false
+  readonly property string prebuiltStatus: host ? (host.prebuiltStatus || "checking") : "checking"
+  readonly property bool prebuiltAvailable: root.prebuiltStatus === "available"
   readonly property var rows: Model.panelRows(root.state)
   readonly property var currentRow: selectedIndex >= 0 && selectedIndex < rows.length
     ? rows[selectedIndex] : null
 
   property int selectedIndex: 0
-  property int setupIndex: 0
+  property int setupIndex: 1
   property bool cursorActive: false
 
   // Bumped on a timer to re-read the preview file. The daemon rewrites it in
@@ -76,6 +78,7 @@ Panel {
     if (root.host) root.host.setPreview(true)
     // Installed by hand, or removed, since the last slow poll.
     if (root.host) root.host.checkInstalled()
+    if (root.notInstalled && root.host) root.host.checkPrebuilt(false)
     // Voice focus is a different unit with a life of its own -- a keybinding or
     // systemctl may have changed it since the last poll.
     if (root.host) root.host.readVoice()
@@ -134,7 +137,7 @@ Panel {
   function moveCursor(delta) {
     if (root.notInstalled) {
       root.cursorActive = true
-      root.setupIndex = 1 - root.setupIndex
+      root.setupIndex = root.prebuiltAvailable ? 1 - root.setupIndex : 1
       return
     }
     if (root.rows.length === 0) return
@@ -146,6 +149,7 @@ Panel {
   //      the change land, and the next thing a user does is often adjust it.
   function chooseSelected() {
     if (root.notInstalled) {
+      if (root.setupIndex === 0 && !root.prebuiltAvailable) return
       if (root.host) root.host.runSetup(root.setupIndex === 0 ? "release" : "build")
       return
     }
@@ -189,7 +193,10 @@ Panel {
   function handleTextKey(text) {
     var key = String(text).toLowerCase()
     if (key === "i" && root.notInstalled && root.host) root.chooseSelected()
-    else if (key === "r" && root.host) root.host.refresh()
+    else if (key === "r" && root.host) {
+      if (root.notInstalled) root.host.checkPrebuilt(true)
+      else root.host.refresh()
+    }
     else if (key === "f" && root.host) root.host.toggle()
     else if (key === "c") root.togglePower()
     else if (key === "v") root.toggleVoice()
@@ -202,6 +209,10 @@ Panel {
   onRunningChanged: {
     previewBox.givenUp = false
     if (root.running && root.opened && root.host) root.host.setPreview(true)
+  }
+
+  onPrebuiltAvailableChanged: {
+    if (!root.prebuiltAvailable && root.setupIndex === 0) root.setupIndex = 1
   }
 
   // `replace` disappearing — the daemon restarted without a background — can
@@ -222,10 +233,12 @@ Panel {
     required property int index
     required property string label
     required property string detail
+    property bool selectable: true
+    enabled: setup.selectable
     visible: root.notInstalled
     width: parent ? parent.width : 0
     height: root.rowHeight + setupDetail.implicitHeight + Style.space(6)
-    hasCursor: root.cursorActive && root.setupIndex === setup.index
+    hasCursor: setup.selectable && root.cursorActive && root.setupIndex === setup.index
     foreground: root.contentForeground
     accent: Color.accent
     fill: root.hoverFill
@@ -233,6 +246,7 @@ Panel {
 
     MouseArea {
       anchors.fill: parent
+      enabled: setup.selectable
       hoverEnabled: true
       cursorShape: Qt.PointingHandCursor
       onContainsMouseChanged: if (containsMouse) {
@@ -251,7 +265,7 @@ Panel {
       width: parent.width - Style.space(64)
       textFormat: Text.PlainText
       text: setup.label
-      color: root.contentForeground
+      color: setup.selectable ? root.contentForeground : root.dim
       font.family: root.contentFontFamily
       font.pixelSize: Style.font.body
       elide: Text.ElideRight
@@ -495,8 +509,9 @@ Panel {
 
         SetupRow {
           index: 0
-          label: "Install release"
-          detail: "Download the prebuilt package. No compilation.\nx86-64, OpenVINO 2026.3.1."
+          label: "Use prebuilt"
+          selectable: root.prebuiltAvailable
+          detail: Model.prebuiltHint(root.prebuiltStatus)
         }
         SetupRow {
           index: 1

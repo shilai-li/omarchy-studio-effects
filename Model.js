@@ -96,6 +96,48 @@ function parseInstalled(exitCode) {
     return "unknown";
 }
 
+// Only the published asset our installer knows how to verify is usable. This
+// is a public, unauthenticated request: drafts must stay unavailable even on a
+// maintainer's machine with gh credentials. curl's final line is the HTTP code.
+var PREBUILT_TAG = "v0.1.0";
+var PREBUILT_PACKAGE = "omarchy-studio-effects-0.1.0-2-x86_64.pkg.tar.zst";
+function prebuiltCommand() {
+    return ["/usr/bin/curl", "--silent", "--show-error", "--location",
+            "--proto", "=https", "--proto-redir", "=https",
+            "--connect-timeout", "3", "--max-time", "8",
+            "--header", "Accept: application/vnd.github+json",
+            "--write-out", "\n%{http_code}",
+            "https://api.github.com/repos/shilai-li/omarchy-studio-effects/releases/tags/" + PREBUILT_TAG];
+}
+function parsePrebuilt(exitCode, output) {
+    if (exitCode !== 0 || typeof output !== "string") return "unknown";
+    var split = output.trim().lastIndexOf("\n");
+    if (split < 0) return "unknown";
+    var code = output.trim().slice(split + 1);
+    if (code === "404") return "unavailable";
+    if (code !== "200") return "unknown";
+    var release;
+    try { release = JSON.parse(output.trim().slice(0, split)); }
+    catch (_) { return "unknown"; }
+    if (!release || release.draft !== false || release.tag_name !== PREBUILT_TAG)
+        return "unavailable";
+    if (!Array.isArray(release.assets)) return "unavailable";
+    var url = "https://github.com/shilai-li/omarchy-studio-effects/releases/download/"
+            + PREBUILT_TAG + "/" + PREBUILT_PACKAGE;
+    for (var i = 0; i < release.assets.length; i++) {
+        var asset = release.assets[i];
+        if (asset && asset.name === PREBUILT_PACKAGE && asset.state === "uploaded"
+                && asset.browser_download_url === url) return "available";
+    }
+    return "unavailable";
+}
+function prebuiltHint(status) {
+    if (status === "available") return "Download the prebuilt package. No compilation.\nx86-64, OpenVINO 2026.3.1.";
+    if (status === "checking") return "Checking for a published prebuilt package…";
+    if (status === "unavailable") return "Unavailable — no release is currently published.";
+    return "Unavailable — could not check releases. Press r to retry.";
+}
+
 // What opens the setup script in a terminal the person can see. The widget never
 // builds or installs anything itself: it runs in the shell process with the
 // shell's privileges, and a sudo prompt has to be answered somewhere a person is
@@ -574,6 +616,9 @@ if (typeof module !== "undefined" && module.exports) {
         installedCommand: installedCommand,
         parseInstalled: parseInstalled,
         setupLaunch: setupLaunch,
+        prebuiltCommand: prebuiltCommand,
+        parsePrebuilt: parsePrebuilt,
+        prebuiltHint: prebuiltHint,
         voiceCommand: voiceCommand,
         voiceStatusCommand: voiceStatusCommand,
         parseVoiceState: parseVoiceState,

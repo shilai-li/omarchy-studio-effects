@@ -42,12 +42,17 @@ omarchy plugin add https://github.com/shilai-li/omarchy-studio-effects.git --ena
 
 Open the widget's panel. If the daemon is missing, it offers two choices:
 
-- **Install release** — downloads and verifies the prebuilt package, then
+- **Use prebuilt** — downloads and verifies the prebuilt package, then
   installs it. No compiler needed; the current release supports x86-64 with
   OpenVINO 2026.3.1.
 - **Build from source** — builds from the plugin's checkout against your
   installed libraries, then installs. Downloads build tools and models and
   takes a few minutes. Use this if the release does not match your system.
+
+**Use prebuilt** is gray and cannot be selected until the supported package is
+publicly available. While there is no published release it says
+"Unavailable — no release is currently published." Failed availability checks
+also disable it; press `r` to retry. Build from source stays available.
 
 Both open a terminal you can watch and ask for your password before installing.
 The panel changes by itself when the daemon appears. The widget only opens that

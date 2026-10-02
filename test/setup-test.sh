@@ -51,7 +51,7 @@ check "a folder inside another repo is refused" \
 
 menu=$(bash packaging/setup.sh --dry-run 2>&1)
 check "the terminal offers release and source" \
-      bash -c '[[ "$1" == *"1) Install release"* && "$1" == *"2) Build from source"* ]]' _ "$menu"
+      bash -c '[[ "$1" == *"1) Use prebuilt"* && "$1" == *"2) Build from source"* ]]' _ "$menu"
 check "conflicting methods are refused" bash -c '! bash packaging/setup.sh --release --build --dry-run'
 
 # Exercise the release branch with local command doubles: no network, no sudo.

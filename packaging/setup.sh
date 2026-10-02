@@ -51,7 +51,7 @@ die()  { printf '\nCannot set up: %s\n' "$*" >&2; exit 1; }
 
 if [ -z "$method" ]; then
     say "Choose how to install Studio Effects:"
-    say "  1) Install release — no compilation; x86-64, OpenVINO 2026.3.1"
+    say "  1) Use prebuilt — no compilation; x86-64, OpenVINO 2026.3.1"
     say "  2) Build from source — uses your installed libraries; takes a few minutes"
     if [ "$dry" -eq 1 ]; then
         say "Use --release --dry-run or --build --dry-run to inspect either option."

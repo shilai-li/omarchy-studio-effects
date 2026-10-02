@@ -54,6 +54,8 @@ BarWidget {
   // this is only "somebody asked": it clears when the daemon turns up, and the
   // panel lets the request be made again if the window was closed.
   property bool settingUp: false
+  property string prebuiltStatus: "checking"
+  property double prebuiltCheckedAt: 0
 
   // packaging/setup.sh beside this file, as a filesystem path.
   readonly property string setupScript:
@@ -108,11 +110,21 @@ BarWidget {
   }
 
   function runSetup(method) {
+    if (method === "release" && root.prebuiltStatus !== "available") return
     var argv = Model.setupLaunch(root.setupScript, method)
     if (!argv) return
     root.settingUp = true
     Quickshell.execDetached(argv)
     installPoll.restart()
+  }
+
+  function checkPrebuilt(force) {
+    if (prebuiltProc.running) return
+    if (!force && Date.now() - root.prebuiltCheckedAt < 60000) return
+    root.prebuiltCheckedAt = Date.now()
+    root.prebuiltStatus = "checking"
+    prebuiltProc.command = Model.prebuiltCommand()
+    prebuiltProc.running = true
   }
 
   // ---- Power. Starting and stopping the unit is the real on/off switch.
@@ -222,6 +234,7 @@ BarWidget {
       running: root.state.running,
       installed: root.installed,
       settingUp: root.settingUp,
+      prebuiltStatus: root.prebuiltStatus,
       switching: root.switching,
       effect: root.state.effect,
       blur: root.state.blur,
@@ -290,6 +303,7 @@ BarWidget {
     if (voiceProc.running) voiceProc.running = false
     if (voiceUnitProc.running) voiceUnitProc.running = false
     if (installProc.running) installProc.running = false
+    if (prebuiltProc.running) prebuiltProc.running = false
     installPoll.stop()
   }
 
@@ -379,6 +393,7 @@ BarWidget {
       if (answer === "unknown") return
       var was = root.installed
       root.installed = answer
+      if (answer === "no" && root.opened) root.checkPrebuilt(false)
       if (answer === "yes") {
         root.settingUp = false
         installPoll.stop()
@@ -390,6 +405,21 @@ BarWidget {
         }
       }
     }
+  }
+
+  Process {
+    id: prebuiltProc
+    stdout: StdioCollector { id: prebuiltOut; waitForEnd: true }
+    onExited: function(exitCode, exitStatus) {
+      root.prebuiltStatus = Model.parsePrebuilt(exitStatus === 0 ? exitCode : -1, prebuiltOut.text)
+    }
+  }
+
+  Timer {
+    interval: 300000
+    repeat: true
+    running: root.opened && root.installed === "no"
+    onTriggered: root.checkPrebuilt(false)
   }
 
   // Quick while setup is running, since it ends when the package lands and

@@ -943,7 +943,7 @@ holds each of those to a made-up /sys, since the cases that matter are the ones
 where deleting a device would be wrong.
 
 **The first run: the widget asks, a terminal does.** The intended flow is
-`omarchy plugin add`, then the panel offers Install release or Build from source. The
+`omarchy plugin add`, then the panel offers Use prebuilt or Build from source. The
 installer will not: it clones files and runs nothing, so a fresh plugin has no
 daemon behind it. And the widget must not: it is unsandboxed code inside the
 shell, and building a package and answering a `sudo` prompt are not things to do
@@ -966,7 +966,12 @@ only then runs `sudo pacman -U`. The URL, filename, checksum, and OpenVINO
 version constraint must move together on a new release. A different installed
 OpenVINO or architecture refuses that branch and directs the person to the
 source choice; it never downgrades libraries or silently starts building.
-All network and sudo work remains in the visible terminal, never the widget.
+Downloads and sudo work remain in the visible terminal. The widget makes one
+bounded, unauthenticated request for public release metadata when first-run
+setup opens, and refreshes it every five minutes while that panel is open.
+Drafts, missing package assets, and failed checks never enable the prebuilt
+row. Keyboard navigation skips it, and both panel activation and the host
+installer guard it. This metadata check is the only network exception below.
 
 Three things about the source-build branch are not the obvious way round, and each was a
 mistake waiting to be made:
@@ -1109,7 +1114,8 @@ for that reason; don't re-add it as "the original".
    widget…" questions; `/usr/share/omarchy/shell/README.md` answers the rest.
 2. Measure before optimising, and put the number in this file. Every performance
    claim here is reproducible with a command in the repo.
-3. The plugin half runs unsandboxed inside the shell. No network, no `sudo`, and
+3. The plugin half runs unsandboxed inside the shell. No network except the
+   read-only public release availability check described above, no `sudo`, and
    nothing written outside `~/.local/state/omarchy/studio-effects/`. The one
    thing it may start is a terminal window running `packaging/setup.sh`, on a
    person's say-so, because a terminal is theirs to watch and answer a password

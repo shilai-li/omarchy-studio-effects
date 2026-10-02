@@ -435,6 +435,29 @@ check("each setup choice reaches the terminal as a fixed argument", () => {
     eq(M.setupLaunch(script, bad), null)
 })
 
+check("prebuilt availability requires the supported published package", () => {
+  const asset = {name: "omarchy-studio-effects-0.1.0-2-x86_64.pkg.tar.zst", state: "uploaded",
+    browser_download_url: "https://github.com/shilai-li/omarchy-studio-effects/releases/download/v0.1.0/omarchy-studio-effects-0.1.0-2-x86_64.pkg.tar.zst"}
+  const release = {draft: false, prerelease: true, tag_name: "v0.1.0", assets: [asset]}
+  const response = obj => JSON.stringify(obj) + "\n200"
+  eq(M.parsePrebuilt(0, response(release)), "available")
+  eq(M.parsePrebuilt(0, response({...release, draft: true})), "unavailable")
+  eq(M.parsePrebuilt(0, response({...release, tag_name: "v0.2.0"})), "unavailable")
+  eq(M.parsePrebuilt(0, response({...release, assets: []})), "unavailable")
+  eq(M.parsePrebuilt(0, response({...release, assets: [{...asset, state: "new"}]})), "unavailable")
+  eq(M.parsePrebuilt(0, response({...release, assets: [{...asset, browser_download_url: "https://example.com/file"}]})), "unavailable")
+})
+
+check("missing releases and failed checks stay unavailable with distinct hints", () => {
+  eq(M.parsePrebuilt(0, '{"message":"Not Found"}\n404'), "unavailable")
+  eq(M.parsePrebuilt(28, "\n000"), "unknown")
+  eq(M.parsePrebuilt(0, '{"message":"rate limited"}\n403'), "unknown")
+  eq(M.parsePrebuilt(0, "not json\n200"), "unknown")
+  ok(M.prebuiltHint("unavailable").includes("no release is currently published"))
+  ok(M.prebuiltHint("unknown").includes("Press r to retry"))
+  ok(M.prebuiltHint("checking").includes("Checking"))
+})
+
 check("the launchers are found on a fixed PATH, not the inherited one", () => {
   const s = M.LAUNCH_SCRIPT
   ok(s.indexOf("PATH=/usr/share/omarchy/bin:/usr/bin:/bin") !== -1, "trusted() sets PATH itself")
