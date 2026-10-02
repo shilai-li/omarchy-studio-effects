@@ -405,6 +405,12 @@ but it now saves about 2 ms rather than 10.
 
 ## Invariants
 
+**Smoothness is extra passes on screen, total passes on the wire.** The panel
+displays `passes - 1`, so zero still applies one blur pass. Commands, saved
+settings, and the config keep their existing 1-3 total-pass values. Only the
+display is offset; stepping and clamping use the daemon's range, so an old
+saved setting keeps the same image after a widget update.
+
 **Two models, and the NPU's spare capacity is what pays for the second.**
 `segmentation` is MediaPipe selfie segmentation at 0.8 ms; `matting` is
 RobustVideoMatting at 3.4 ms, a true alpha matte with recurrent state, so hair

@@ -427,7 +427,7 @@ Panel {
         // config file takes and what `studio-effects model` takes, and a
         // second name for the same thing is a thing to get wrong.
         var v = row.isChoice ? Model.choiceValue(root.state, row.paramKey)
-              : row.isParam ? Model.paramValue(root.state, row.paramKey)
+              : row.isParam ? Model.paramDisplayValue(root.state, row.paramKey)
               : ""
         if (!row.isParam && !row.isChoice) return ""
         return row.hasCursor ? "\u2039 " + v + " \u203a" : String(v)

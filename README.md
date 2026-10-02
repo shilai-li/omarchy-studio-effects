@@ -167,12 +167,17 @@ frame for the widget instead.
 
 Below the effects are the settings that apply to whichever one is on:
 
+A fresh installation starts with the **matting** model, blur **20**, smoothness
+**0**, darken **0**, and desaturate **0**. Smoothness counts extra blur passes:
+0 is one basic pass, 1 is two passes, and 2 is three passes. Saved choices take
+precedence on subsequent starts.
+
 | | |
 |---|---|
 | **Auto framing** | tracks you and keeps you centred |
 | **Zoom in** | how close it may crop, 100–300%. Raise it if you sit far back |
 | **Blur** | radius, 0-200 |
-| **Smoothness** | blur repeats, 1-3. One streaks against hard edges; two looks Gaussian |
+| **Smoothness** | extra blur passes, 0-2. Raise it for softer, more Gaussian blur |
 | **Darken** | dim the background, 0-100, so you stand out |
 | **Desaturate** | drain its colour, 0-100 |
 
@@ -287,8 +292,8 @@ bindd = SUPER CTRL, B, Toggle camera effects, exec, studio-effects toggle
 ## Two models
 
 ```conf
-MODEL=segmentation   # MediaPipe, 0.8 ms, a hard-edged mask
-MODEL=matting        # RobustVideoMatting, 3.4 ms, a true alpha matte
+MODEL=matting        # default: RobustVideoMatting, 3.4 ms, a true alpha matte
+MODEL=segmentation   # alternative: MediaPipe, 0.8 ms, a hard-edged mask
 ```
 
 Both run on the NPU. Matting gives soft, natural hair edges and holds them still
@@ -424,8 +429,8 @@ If you package this for others, note that a package built with the default
 `PKGBUILD` contains GPL-3.0 material, which is why its `license` field names
 all three. A segmentation-only package must omit the RVM downloads, conversion,
 model installation, and RVM source bundle; it still contains Apache-2.0 material.
-The daemon runs fine with one model installed, and the panel then hides the
-Model row.
+For that package, set `MODEL=segmentation` in the config. The daemon runs fine
+with one model installed, and the panel then hides the Model row.
 
 ## License
 

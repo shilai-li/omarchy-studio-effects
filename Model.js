@@ -216,7 +216,7 @@ var PARAMS = [
     { key: "zoom",   label: "Zoom in",    min: 100, max: 300, step: 20,
       effects: ["none", "blur", "replace"], needs: "framing" },
     { key: "blur",   label: "Blur",       min: 0, max: 200, step: 6,  effects: ["blur"] },
-    { key: "passes", label: "Smoothness", min: 1, max: 3,   step: 1,  effects: ["blur"] },
+    { key: "passes", label: "Smoothness", min: 1, max: 3,   step: 1, displayOffset: -1, effects: ["blur"] },
     { key: "dim",    label: "Darken",     min: 0, max: 100, step: 10, effects: ["blur", "replace"] },
     { key: "desat",  label: "Desaturate", min: 0, max: 100, step: 10, effects: ["blur", "replace"] }
 ];
@@ -329,6 +329,13 @@ function paramValue(state, key) {
     return state && typeof state[key] === "number" ? state[key] : clampParam(key, 0);
 }
 
+// Smoothness counts extra passes on screen; the daemon still receives total
+// passes (1-3), so existing saved settings and older daemons keep their meaning.
+function paramDisplayValue(state, key) {
+    var spec = paramFor(key);
+    return paramValue(state, key) + (spec && spec.displayOffset ? spec.displayOffset : 0);
+}
+
 // The rows the panel shows: the effects, then the settings that apply to
 // whichever effect is on. A slider for something the current effect ignores is
 // worse than no slider -- it invites a change that does nothing visible.
@@ -416,7 +423,7 @@ function isEffect(effect) {
 
 function clampBlur(radius) {
     var n = Math.round(Number(radius));
-    if (!isFinite(n)) return 12;
+    if (!isFinite(n)) return 20;
     return Math.max(BLUR_MIN, Math.min(BLUR_MAX, n));
 }
 
@@ -427,7 +434,7 @@ function unknownState(reason) {
         ok: false,
         running: false,
         effect: "none",
-        blur: 12,
+        blur: 20,
         device: "",
         input: "",
         output: "",
@@ -589,7 +596,7 @@ function indexOfEffect(state, rows) {
 }
 
 function stepBlur(state, direction) {
-    var base = state ? state.blur : 12;
+    var base = state ? state.blur : 20;
     return clampBlur(base + direction * BLUR_STEP);
 }
 
@@ -650,6 +657,7 @@ if (typeof module !== "undefined" && module.exports) {
         clampParam: clampParam,
         paramCommand: paramCommand,
         paramValue: paramValue,
+        paramDisplayValue: paramDisplayValue,
         supportedParams: supportedParams,
         CHOICES: CHOICES,
         choiceFor: choiceFor,

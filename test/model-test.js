@@ -41,7 +41,7 @@ check("an effect the daemon does not know is refused here, not sent", () => {
 check("blur is clamped before it is sent", () => {
   eq(M.blurCommand(9999), [M.BINARY, "blur", "200"])
   eq(M.blurCommand(-5), [M.BINARY, "blur", "0"])
-  eq(M.blurCommand("nonsense"), [M.BINARY, "blur", "12"])
+  eq(M.blurCommand("nonsense"), [M.BINARY, "blur", "20"])
 })
 
 // ---- Starting and stopping the daemon. This, not `effect none`, is what
@@ -190,6 +190,17 @@ check("stepping stays inside the range and moves by the right amount", () => {
   eq(M.stepParam({ passes: 3 }, "passes", 1), 3, "clamped at the top")
   eq(M.stepParam({ dim: 0 }, "dim", -1), 0, "clamped at the bottom")
   eq(M.stepParam({ dim: 50 }, "dim", 1), 60)
+})
+
+check("smoothness displays extra passes while commands preserve total passes", () => {
+  for (const passes of [1, 2, 3]) {
+    const state = M.parseStatus(JSON.stringify({effect: "blur", passes}))
+    eq(M.paramDisplayValue(state, "passes"), passes - 1)
+    eq(M.paramCommand("passes", M.paramValue(state, "passes")),
+       [M.BINARY, "passes", String(passes)])
+  }
+  eq(M.paramDisplayValue(M.notRunningState(), "passes"), 0)
+  eq(M.paramDisplayValue({dim: 40}, "dim"), 40)
 })
 
 check("a daemon that does not report a setting is not offered rows for it", () => {

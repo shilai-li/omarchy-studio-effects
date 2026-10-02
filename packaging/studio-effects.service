@@ -30,8 +30,8 @@ Environment=FPS=0
 Environment=HOLD_FRAMERATE=on
 Environment=CAPTURE_WIDTH=0
 Environment=CAPTURE_HEIGHT=0
-Environment=MODEL=segmentation
-Environment=BLUR=12
+Environment=MODEL=matting
+Environment=BLUR=20
 Environment=PASSES=1
 Environment=DIM=0
 Environment=DESAT=0

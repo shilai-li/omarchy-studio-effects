@@ -94,7 +94,7 @@ struct Args {
     background: Option<String>,
 
     /// Background blur radius in pixels, at the frame's own scale.
-    #[arg(long, default_value_t = 12)]
+    #[arg(long, default_value_t = 20)]
     blur: usize,
 
     /// Repeats of the box blur, 1 to 3. One is cheapest and can look boxy
@@ -159,7 +159,7 @@ struct Args {
     /// segmentation  MediaPipe selfie segmentation. 0.8 ms, a hard-edged mask.
     /// matting       RobustVideoMatting. 3.4 ms, a true alpha matte with
     ///               recurrent state, so edges hold still between frames.
-    #[arg(long, default_value = "segmentation")]
+    #[arg(long, default_value = "matting")]
     model: String,
 
     #[arg(long, default_value = "/tmp/studio-effects-cache")]

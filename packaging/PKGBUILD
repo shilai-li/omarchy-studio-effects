@@ -1,7 +1,7 @@
 # Maintainer: Shilai Li <robotmaster1024@gmail.com>
 pkgname=omarchy-studio-effects
 pkgver=0.1.0
-pkgrel=2
+pkgrel=3
 pkgdesc="NPU-accelerated camera background effects for Omarchy"
 arch=('x86_64')
 url="https://github.com/shilai-li/omarchy-studio-effects"

@@ -58,15 +58,16 @@ CAPTURE_HEIGHT=0
 # panel's "Model" row, or `studio-effects model matting`: the swap takes about
 # 15 ms from the compile cache, which is what makes comparing them on the same
 # face in the same light possible at all. This sets which one starts.
-MODEL=segmentation
+MODEL=matting
 
 # Background blur radius, in pixels at the frame's own scale. Adjustable while
 # running from the bar panel, or `studio-effects blur 40`.
-BLUR=12
+BLUR=20
 
 # Repeats of the blur, 1 to 3. One is the cheapest and the default; it can show
 # streaking against hard edges. Two is close enough to a Gaussian, at twice the
-# blur cost. Adjustable from the panel as "Smoothness".
+# blur cost. The panel's "Smoothness" counts extra passes: 0 is one pass,
+# 1 is two passes, and 2 is three passes.
 PASSES=1
 
 # Darken the background, 0 to 100. Makes you stand out without touching you.
