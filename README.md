@@ -36,11 +36,33 @@ builds nothing and runs nothing.
 
 ## Install
 
+### Prebuilt package (Arch/Omarchy, x86-64)
+
+Download the daemon package from the
+[v0.1.0 release](https://github.com/shilai-li/omarchy-studio-effects/releases/tag/v0.1.0)
+and install it without Rust or model conversion:
+
+```bash
+curl -fLO https://github.com/shilai-li/omarchy-studio-effects/releases/download/v0.1.0/omarchy-studio-effects-0.1.0-2-x86_64.pkg.tar.zst
+curl -fLO https://github.com/shilai-li/omarchy-studio-effects/releases/download/v0.1.0/SHA256SUMS
+sha256sum -c SHA256SUMS
+sudo pacman -U ./omarchy-studio-effects-0.1.0-2-x86_64.pkg.tar.zst
+omarchy plugin add https://github.com/shilai-li/omarchy-studio-effects.git --enable
+```
+
+The release binary requires **OpenVINO 2026.3.1**. Its package dependency pins
+that version because OpenVINO patch releases change the library soname. If your
+system uses another version, build from source below; avoid downgrading your
+system's libraries to fit this binary. Pacman installs the package's runtime
+dependencies. No build tools are needed for the prebuilt package.
+
+### Build from source
+
 ```bash
 omarchy plugin add https://github.com/shilai-li/omarchy-studio-effects.git --enable
 ```
 
-That is all of it. The daemon is a package, and `omarchy plugin add` builds
+The daemon is a package, and `omarchy plugin add` builds
 nothing, so right after adding the plugin the bar widget knows the daemon is
 missing. Open its panel and it says so, with one row: **Set up**. Choosing it
 opens a terminal window that builds the daemon from the plugin's own checkout
@@ -371,10 +393,26 @@ Both are converted to OpenVINO IR by `tools/convert.py` at package build time;
 the `.xml`/`.bin` pairs are build products of whichever model they came from and
 inherit its licence.
 
+Copies of [Apache-2.0](models/LICENSE-Apache-2.0.txt) and
+[RVM's GPL-3.0](models/LICENSE-RVM-GPL-3.0.txt) are kept beside the model.
+[Model sources and conversion instructions](models/MODEL-SOURCES.md) record
+upstream attribution, pinned revisions, checksums, and the changes made by
+conversion.
+
+The package installs all three licence texts and model attribution under
+`/usr/share/licenses/omarchy-studio-effects/`. It also includes the RVM ONNX
+input, original PyTorch weights, upstream source and exporter archives, and
+the exact conversion script and PKGBUILD used for that build under
+`/usr/share/doc/omarchy-studio-effects/model-source/`. Source materials are
+included with every default package, not offered only through upstream links.
+The build record there gives the conversion date and OpenVINO/NumPy versions.
+
 If you package this for others, note that a package built with the default
 `PKGBUILD` contains GPL-3.0 material, which is why its `license` field names
-all three. Building with only `segmentation` avoids that — the daemon runs fine
-with one model installed, and the panel then hides the Model row.
+all three. A segmentation-only package must omit the RVM downloads, conversion,
+model installation, and RVM source bundle; it still contains Apache-2.0 material.
+The daemon runs fine with one model installed, and the panel then hides the
+Model row.
 
 ## License
 

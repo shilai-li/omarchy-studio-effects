@@ -8,9 +8,11 @@ target/
 /packaging/src/
 *.pkg.tar.zst
 
-# makepkg caches downloaded sources beside the PKGBUILD. Kept rather than
-# deleted so a rebuild does not re-fetch 15 MB, but never committed.
+# makepkg caches model weights and source archives beside the PKGBUILD. Kept
+# across rebuilds, but never committed.
 /packaging/*.onnx
+/packaging/*.pth
+/packaging/rvm*-source.tar.gz
 /models/*.xml
 /models/*.bin
 

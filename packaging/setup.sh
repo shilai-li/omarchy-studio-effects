@@ -62,7 +62,7 @@ cat <<EOF
 Studio Effects needs its daemon, which is built here and installed as a package.
 
   builds    the daemon and converts its two models   (a few minutes; fetches about
-                                                      15 MB and Rust crates)
+                                                      model sources and Rust crates)
   installs  the package system-wide                  (asks for sudo)
   creates   the "Studio Camera" device                (asks for sudo, via the package)
   does not  start the camera or the microphone filter -- those stay off until
@@ -74,8 +74,8 @@ Studio Effects needs its daemon, which is built here and installed as a package.
 
 EOF
 
-# SRCDEST keeps the 15 MB model download across rebuilds, since the clone it is
-# built in is thrown away each time.
+# SRCDEST keeps model weights and source archives across rebuilds, since the
+# clone it is built in is thrown away each time.
 command=(env "SRCDEST=$build/sources" makepkg -sfi)
 
 if [ "$dry" -eq 1 ]; then
