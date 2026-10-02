@@ -36,6 +36,23 @@ builds nothing and runs nothing.
 
 ## Install
 
+```bash
+omarchy plugin add https://github.com/shilai-li/omarchy-studio-effects.git --enable
+```
+
+Open the widget's panel. If the daemon is missing, it offers two choices:
+
+- **Install release** — downloads and verifies the prebuilt package, then
+  installs it. No compiler needed; the current release supports x86-64 with
+  OpenVINO 2026.3.1.
+- **Build from source** — builds from the plugin's checkout against your
+  installed libraries, then installs. Downloads build tools and models and
+  takes a few minutes. Use this if the release does not match your system.
+
+Both open a terminal you can watch and ask for your password before installing.
+The panel changes by itself when the daemon appears. The widget only opens that
+window; it never downloads, builds, or runs `sudo` inside the shell process.
+
 ### Prebuilt package (Arch/Omarchy, x86-64)
 
 Download the daemon package from the
@@ -58,23 +75,14 @@ dependencies. No build tools are needed for the prebuilt package.
 
 ### Build from source
 
-```bash
-omarchy plugin add https://github.com/shilai-li/omarchy-studio-effects.git --enable
-```
-
-The daemon is a package, and `omarchy plugin add` builds
-nothing, so right after adding the plugin the bar widget knows the daemon is
-missing. Open its panel and it says so, with one row: **Set up**. Choosing it
-opens a terminal window that builds the daemon from the plugin's own checkout
-and installs it -- a few minutes, and it asks for your password there, where you
-can see it. The panel changes by itself when the package lands.
-
-The widget never builds anything or runs `sudo` itself; it only opens that
-window. To do the same by hand:
+Choose **Build from source** in the panel, or run it by hand:
 
 ```bash
-bash ~/.config/omarchy/plugins/shilai_li.studio-effects/packaging/setup.sh
+bash ~/.config/omarchy/plugins/shilai_li.studio-effects/packaging/setup.sh --build
 ```
+
+Use `--release` for the prebuilt download, or omit the flag to choose between
+both methods in the terminal. Add `--dry-run` to inspect either plan.
 
 Installing the package creates the **Studio Camera** device and starts it at
 boot, so there is nothing to enable by hand -- the daemon can only write to a

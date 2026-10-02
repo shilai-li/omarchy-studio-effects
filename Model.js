@@ -114,19 +114,25 @@ var LAUNCH_SCRIPT =
     'trusted() { PATH=/usr/share/omarchy/bin:/usr/bin:/bin command -v -- "$1"; }\n'
     + 'script=$1\n'
     + '[ -f "$script" ] || exit 1\n'
+    + 'args=()\n'
+    + '[ -z "${2:-}" ] || args+=("$2")\n'
     + 'presenter=$(trusted omarchy-launch-floating-terminal-with-presentation) || presenter=""\n'
     + 'if [ -n "$presenter" ]; then\n'
-    + '  exec "$presenter" "$(printf \'%q \' /usr/bin/bash "$script")"\n'
+    + '  exec "$presenter" "$(printf \'%q \' /usr/bin/bash "$script" "${args[@]}")"\n'
     + 'fi\n'
     + 'term=$(trusted xdg-terminal-exec) || exit 1\n'
     + 'session=$(trusted setsid) || session=""\n'
-    + 'if [ -n "$session" ]; then exec "$session" "$term" /usr/bin/bash "$script"; fi\n'
-    + 'exec "$term" /usr/bin/bash "$script"';
+    + 'if [ -n "$session" ]; then exec "$session" "$term" /usr/bin/bash "$script" "${args[@]}"; fi\n'
+    + 'exec "$term" /usr/bin/bash "$script" "${args[@]}"';
 
-function setupLaunch(scriptPath) {
+function setupLaunch(scriptPath, method) {
     if (typeof scriptPath !== "string" || scriptPath.length === 0 || scriptPath.charAt(0) !== "/")
         return null;
-    return [SHELL, "-c", LAUNCH_SCRIPT, "studio-effects-setup", scriptPath];
+    if (method !== undefined && method !== "" && method !== "release" && method !== "build")
+        return null;
+    var argv = [SHELL, "-c", LAUNCH_SCRIPT, "studio-effects-setup", scriptPath];
+    if (method === "release" || method === "build") argv.push("--" + method);
+    return argv;
 }
 
 // How often to re-check while setup is running in the terminal. It finishes

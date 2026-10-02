@@ -47,6 +47,7 @@ Panel {
     ? rows[selectedIndex] : null
 
   property int selectedIndex: 0
+  property int setupIndex: 0
   property bool cursorActive: false
 
   // Bumped on a timer to re-read the preview file. The daemon rewrites it in
@@ -131,6 +132,11 @@ Panel {
   // Walks past hints: they are there to be read, and a cursor that could stop on
   // one would show a highlight on a row that enter does nothing on.
   function moveCursor(delta) {
+    if (root.notInstalled) {
+      root.cursorActive = true
+      root.setupIndex = 1 - root.setupIndex
+      return
+    }
     if (root.rows.length === 0) return
     root.cursorActive = true
     root.selectedIndex = Model.nextSelectable(root.rows, root.selectedIndex, delta < 0 ? -1 : 1)
@@ -139,8 +145,10 @@ Panel {
   // ---- Actions. Choosing an effect leaves the panel up: the point is to see
   //      the change land, and the next thing a user does is often adjust it.
   function chooseSelected() {
-    // With no daemon there is exactly one thing to choose, and no rows to walk.
-    if (root.notInstalled) { root.host.runSetup(); return }
+    if (root.notInstalled) {
+      if (root.host) root.host.runSetup(root.setupIndex === 0 ? "release" : "build")
+      return
+    }
     if (!root.host || !root.currentRow) return
     if (root.currentRow.kind === "effect") {
       root.host.setEffect(root.currentRow.effect)
@@ -180,7 +188,7 @@ Panel {
 
   function handleTextKey(text) {
     var key = String(text).toLowerCase()
-    if (key === "i" && root.notInstalled && root.host) root.host.runSetup()
+    if (key === "i" && root.notInstalled && root.host) root.chooseSelected()
     else if (key === "r" && root.host) root.host.refresh()
     else if (key === "f" && root.host) root.host.toggle()
     else if (key === "c") root.togglePower()
@@ -209,6 +217,69 @@ Panel {
 
   // ---- One row. Either an effect to choose or a setting to adjust; they share
   //      a component so the cursor walks one list rather than two.
+  component SetupRow: CursorSurface {
+    id: setup
+    required property int index
+    required property string label
+    required property string detail
+    visible: root.notInstalled
+    width: parent ? parent.width : 0
+    height: root.rowHeight + setupDetail.implicitHeight + Style.space(6)
+    hasCursor: root.cursorActive && root.setupIndex === setup.index
+    foreground: root.contentForeground
+    accent: Color.accent
+    fill: root.hoverFill
+    currentFill: root.selectedFill
+
+    MouseArea {
+      anchors.fill: parent
+      hoverEnabled: true
+      cursorShape: Qt.PointingHandCursor
+      onContainsMouseChanged: if (containsMouse) {
+        root.cursorActive = true
+        root.setupIndex = setup.index
+      }
+      onClicked: {
+        root.setupIndex = setup.index
+        root.chooseSelected()
+      }
+    }
+
+    Text {
+      x: Style.space(8)
+      y: Math.round((root.rowHeight - height) / 2)
+      width: parent.width - Style.space(64)
+      textFormat: Text.PlainText
+      text: setup.label
+      color: root.contentForeground
+      font.family: root.contentFontFamily
+      font.pixelSize: Style.font.body
+      elide: Text.ElideRight
+    }
+    Text {
+      anchors.right: parent.right
+      anchors.rightMargin: Style.space(8)
+      y: Math.round((root.rowHeight - height) / 2)
+      textFormat: Text.PlainText
+      text: setup.hasCursor ? "enter" : ""
+      color: root.accentColor
+      font.family: root.contentFontFamily
+      font.pixelSize: Style.font.caption
+    }
+    Text {
+      id: setupDetail
+      x: Style.space(8)
+      y: root.rowHeight
+      width: parent.width - Style.space(16)
+      textFormat: Text.PlainText
+      text: setup.detail
+      color: root.dim
+      font.family: root.contentFontFamily
+      font.pixelSize: Style.font.caption
+      wrapMode: Text.WordWrap
+    }
+  }
+
   component EffectRow: CursorSurface {
     id: row
 
@@ -401,8 +472,8 @@ Panel {
           foreground: root.contentForeground
         }
 
-        // No daemon: say so, and offer the one thing that fixes it. Setup opens in a
-        // terminal because it builds a package and asks for sudo, neither of
+        // No daemon: offer a release install or a source build. Both open in a
+        // terminal because installing asks for sudo, neither of
         // which a widget inside the shell should do -- and neither of which a
         // person should have to take on trust from a window they cannot see.
         Text {
@@ -410,9 +481,9 @@ Panel {
           visible: root.notInstalled
           textFormat: Text.PlainText
           text: "The Studio Effects daemon is not installed yet.\n\n"
-              + "Setting up builds it and installs it as a package. That takes a few "
-              + "minutes and asks for your password, in a terminal window you can "
-              + "watch. The camera and microphone stay off until you turn them on."
+              + "Choose how to install it. Both options open a terminal and ask "
+              + "for your password before installation. The camera and microphone "
+              + "stay off until you turn them on."
           color: root.contentForeground
           font.family: root.contentFontFamily
           font.pixelSize: Style.font.caption
@@ -422,46 +493,15 @@ Panel {
           bottomPadding: Style.space(6)
         }
 
-        CursorSurface {
-          id: setupRow
-          visible: root.notInstalled
-          width: parent.width
-          height: root.rowHeight
-          hasCursor: true
-          foreground: root.contentForeground
-          accent: Color.accent
-          fill: root.hoverFill
-          currentFill: root.selectedFill
-
-          MouseArea {
-            anchors.fill: parent
-            hoverEnabled: true
-            cursorShape: Qt.PointingHandCursor
-            onClicked: root.chooseSelected()
-          }
-
-          Text {
-            anchors.left: parent.left
-            anchors.leftMargin: Style.space(8)
-            anchors.verticalCenter: parent.verticalCenter
-            textFormat: Text.PlainText
-            text: root.settingUp ? "Set up again" : "Set up"
-            color: root.contentForeground
-            font.family: root.contentFontFamily
-            font.pixelSize: Style.font.body
-          }
-
-          Text {
-            anchors.right: parent.right
-            anchors.rightMargin: Style.space(8)
-            anchors.verticalCenter: parent.verticalCenter
-            textFormat: Text.PlainText
-            text: root.settingUp ? "…" : "enter"
-            color: root.accentColor
-            font.family: root.contentFontFamily
-            font.pixelSize: Style.font.body
-            font.bold: true
-          }
+        SetupRow {
+          index: 0
+          label: "Install release"
+          detail: "Download the prebuilt package. No compilation.\nx86-64, OpenVINO 2026.3.1."
+        }
+        SetupRow {
+          index: 1
+          label: "Build from source"
+          detail: "Build for your installed libraries.\nDownloads build tools and models; takes a few minutes."
         }
 
         // Shown once it has been started. There is no handle on the terminal, so

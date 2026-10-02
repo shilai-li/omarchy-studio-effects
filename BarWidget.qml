@@ -107,8 +107,8 @@ BarWidget {
     installProc.running = true
   }
 
-  function runSetup() {
-    var argv = Model.setupLaunch(root.setupScript)
+  function runSetup(method) {
+    var argv = Model.setupLaunch(root.setupScript, method)
     if (!argv) return
     root.settingUp = true
     Quickshell.execDetached(argv)

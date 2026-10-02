@@ -64,7 +64,7 @@ daemon/examples/preview_cost.rs    how long the preview holds up the frame loop
 daemon/examples/frame_cost.rs      each CPU stage of the frame loop, no camera needed
 daemon/examples/devices.rs         every model on every device this machine has, compared
 packaging/               systemd units, PKGBUILD, example config
-packaging/setup.sh       what the widget opens in a terminal to build and install the daemon
+packaging/setup.sh       terminal setup: verified release download or local source build
 packaging/studio-effects-loopback-prepare   loads v4l2loopback without leaving its dummy device
 test/setup-test.sh       the setup script's dry run and its refusals, no sudo
 ```
@@ -943,7 +943,7 @@ holds each of those to a made-up /sys, since the cases that matter are the ones
 where deleting a device would be wrong.
 
 **The first run: the widget asks, a terminal does.** The intended flow is
-`omarchy plugin add`, then the panel offers to build and install the daemon. The
+`omarchy plugin add`, then the panel offers Install release or Build from source. The
 installer will not: it clones files and runs nothing, so a fresh plugin has no
 daemon behind it. And the widget must not: it is unsandboxed code inside the
 shell, and building a package and answering a `sudo` prompt are not things to do
@@ -954,13 +954,21 @@ about what the widget does, and it still holds: the terminal is the person's,
 and the password prompt is answered in it.
 
 "Not installed" is its own state and not a flavour of "not running", because the
-fix is different -- build one, not start one -- and because the camera and voice
+fix is different -- install one, not start one -- and because the camera and voice
 rows would only fail there, as "systemd refused", which sends anyone looking in
 the wrong place. Only a definite exit 1 from `test -x` counts. A check that could
 not run says nothing, and answering it with "not installed" would offer to
 reinstall something that is there.
 
-Three things about the script are not the obvious way round, and each was a
+The release branch is independent of the checkout: it downloads the published
+package in a temporary directory, checks a SHA-256 pinned in the script, and
+only then runs `sudo pacman -U`. The URL, filename, checksum, and OpenVINO
+version constraint must move together on a new release. A different installed
+OpenVINO or architecture refuses that branch and directs the person to the
+source choice; it never downgrades libraries or silently starts building.
+All network and sudo work remains in the visible terminal, never the widget.
+
+Three things about the source-build branch are not the obvious way round, and each was a
 mistake waiting to be made:
 
 - **It builds in a clone under `~/.cache`, never in the plugin's folder.**

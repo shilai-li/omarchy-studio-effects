@@ -424,6 +424,17 @@ check("setup refuses a path that is empty, relative or not a string", () => {
     eq(M.setupLaunch(bad), null)
 })
 
+check("each setup choice reaches the terminal as a fixed argument", () => {
+  const script = "/tmp/plugin with spaces/packaging/setup.sh"
+  for (const method of ["release", "build"]) {
+    const argv = M.setupLaunch(script, method)
+    eq(argv.slice(-2), [script, "--" + method])
+    ok(argv[2].indexOf(script) === -1)
+  }
+  for (const bad of ["--release", "release; touch pwned", null, 42])
+    eq(M.setupLaunch(script, bad), null)
+})
+
 check("the launchers are found on a fixed PATH, not the inherited one", () => {
   const s = M.LAUNCH_SCRIPT
   ok(s.indexOf("PATH=/usr/share/omarchy/bin:/usr/bin:/bin") !== -1, "trusted() sets PATH itself")
