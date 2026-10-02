@@ -86,7 +86,7 @@ if [ "$method" = release ]; then
     version=${version#*:}
     [ "$version" = 2026.3.1 ] || die "this release needs OpenVINO 2026.3.1; yours is ${version:-unknown}. Choose Build from source instead."
 
-    package=omarchy-studio-effects-0.1.0-2-x86_64.pkg.tar.zst
+    package=omarchy-studio-effects-0.1.0-3-x86_64.pkg.tar.zst
     url="https://github.com/shilai-li/omarchy-studio-effects/releases/download/v0.1.0/$package"
     # Pinned to the published SHA256SUMS; downloaded bytes cannot supply their
     # own expected checksum. Update these together when publishing a new binary.

@@ -100,7 +100,7 @@ function parseInstalled(exitCode) {
 // is a public, unauthenticated request: drafts must stay unavailable even on a
 // maintainer's machine with gh credentials. curl's final line is the HTTP code.
 var PREBUILT_TAG = "v0.1.0";
-var PREBUILT_PACKAGE = "omarchy-studio-effects-0.1.0-2-x86_64.pkg.tar.zst";
+var PREBUILT_PACKAGE = "omarchy-studio-effects-0.1.0-3-x86_64.pkg.tar.zst";
 function prebuiltCommand() {
     return ["/usr/bin/curl", "--silent", "--show-error", "--location",
             "--proto", "=https", "--proto-redir", "=https",

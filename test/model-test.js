@@ -447,8 +447,8 @@ check("each setup choice reaches the terminal as a fixed argument", () => {
 })
 
 check("prebuilt availability requires the supported published package", () => {
-  const asset = {name: "omarchy-studio-effects-0.1.0-2-x86_64.pkg.tar.zst", state: "uploaded",
-    browser_download_url: "https://github.com/shilai-li/omarchy-studio-effects/releases/download/v0.1.0/omarchy-studio-effects-0.1.0-2-x86_64.pkg.tar.zst"}
+  const asset = {name: "omarchy-studio-effects-0.1.0-3-x86_64.pkg.tar.zst", state: "uploaded",
+    browser_download_url: "https://github.com/shilai-li/omarchy-studio-effects/releases/download/v0.1.0/omarchy-studio-effects-0.1.0-3-x86_64.pkg.tar.zst"}
   const release = {draft: false, prerelease: true, tag_name: "v0.1.0", assets: [asset]}
   const response = obj => JSON.stringify(obj) + "\n200"
   eq(M.parsePrebuilt(0, response(release)), "available")

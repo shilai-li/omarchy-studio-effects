@@ -65,10 +65,10 @@ Download the daemon package from the
 and install it without Rust or model conversion:
 
 ```bash
-curl -fLO https://github.com/shilai-li/omarchy-studio-effects/releases/download/v0.1.0/omarchy-studio-effects-0.1.0-2-x86_64.pkg.tar.zst
+curl -fLO https://github.com/shilai-li/omarchy-studio-effects/releases/download/v0.1.0/omarchy-studio-effects-0.1.0-3-x86_64.pkg.tar.zst
 curl -fLO https://github.com/shilai-li/omarchy-studio-effects/releases/download/v0.1.0/SHA256SUMS
 sha256sum -c SHA256SUMS
-sudo pacman -U ./omarchy-studio-effects-0.1.0-2-x86_64.pkg.tar.zst
+sudo pacman -U ./omarchy-studio-effects-0.1.0-3-x86_64.pkg.tar.zst
 omarchy plugin add https://github.com/shilai-li/omarchy-studio-effects.git --enable
 ```
 
