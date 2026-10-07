@@ -1,4 +1,5 @@
 import QtQuick
+import Quickshell.Io
 import qs.Commons
 import qs.Ui
 import "Model.js" as Model
@@ -52,10 +53,6 @@ Panel {
   property int setupIndex: 1
   property bool cursorActive: false
 
-  // Bumped on a timer to re-read the preview file. The daemon rewrites it in
-  // place, and an Image will not notice a file changing underneath a URL it
-  // has already loaded.
-  property int previewTick: 0
   readonly property string previewPath: root.state.previewPath || ""
   readonly property bool previewLive: root.running && root.state.preview && previewPath.length > 0
 
@@ -701,6 +698,25 @@ Panel {
           // before the first one, not for the gap between every pair.
           property bool everReady: false
           property bool live: root.opened && root.previewLive
+          property bool framePending: false
+
+          function requestFrame() {
+            if (!live) return
+            framePending = true
+            loadNextFrame()
+          }
+
+          // Leave the displayed image alone while decoding its replacement.
+          // If frames arrive faster than decoding, remember only the newest
+          // file instead of repeatedly cancelling a load that cannot finish.
+          function loadNextFrame() {
+            if (!live || !framePending) return
+            var next = showingB ? previewA : previewB
+            if (next.status === Image.Loading) return
+            framePending = false
+            tick++
+            next.source = "file://" + root.previewPath + "?t=" + tick
+          }
 
           // A daemon too old to know the `preview` command leaves the flag
           // false forever, and "starting preview…" then sits there implying
@@ -715,6 +731,7 @@ Panel {
             if (live) {
               previewBox.givenUp = false
             } else {
+              previewBox.framePending = false
               previewA.source = ""
               previewB.source = ""
               previewBox.everReady = false
@@ -738,8 +755,7 @@ Panel {
           // Two images, loaded alternately. The one on screen is never touched
           // until its replacement has finished decoding, so there is no moment
           // where neither has a picture -- which is what made the preview
-          // flicker, and what kept re-showing the placeholder ten times a
-          // second.
+          // flicker, and what kept re-showing the placeholder on each frame.
           Image {
             id: previewA
             anchors.fill: parent
@@ -747,10 +763,14 @@ Panel {
             cache: false
             asynchronous: true
             smooth: true
+            // The daemon supplies enough pixels for high-DPI screens. Filter
+            // the reduction instead of aliasing fine hair and fabric detail.
+            mipmap: true
             opacity: previewBox.showingB ? 0 : 1
             onStatusChanged: if (status === Image.Ready) {
               previewBox.showingB = false
               previewBox.everReady = true
+              previewBox.loadNextFrame()
             }
           }
 
@@ -761,10 +781,12 @@ Panel {
             cache: false
             asynchronous: true
             smooth: true
+            mipmap: true
             opacity: previewBox.showingB ? 1 : 0
             onStatusChanged: if (status === Image.Ready) {
               previewBox.showingB = true
               previewBox.everReady = true
+              previewBox.loadNextFrame()
             }
           }
 
@@ -783,20 +805,15 @@ Panel {
             wrapMode: Text.WordWrap
           }
 
-          // The daemon rewrites the file in place, and an Image will not notice
-          // a file changing under a URL it has already loaded. A query string
-          // makes each read a new URL; QUrl drops it when resolving a file:
-          // path, so the same file is what actually gets opened.
-          Timer {
-            interval: Model.PREVIEW_INTERVAL_MS
-            running: previewBox.live
-            repeat: true
-            onTriggered: {
-              previewBox.tick++
-              var url = "file://" + root.previewPath + "?t=" + previewBox.tick
-              if (previewBox.showingB) previewA.source = url
-              else previewB.source = url
-            }
+          // Atomic JPEG replacements drive the display directly, at the
+          // camera's delivered cadence. No polling timer and no repeated
+          // decoding of an unchanged file. The Image reads the JPEG itself;
+          // FileView only watches it, including creation after camera restart.
+          FileView {
+            path: previewBox.live ? root.previewPath : ""
+            preload: false
+            watchChanges: previewBox.live
+            onFileChanged: Qt.callLater(previewBox.requestFrame)
           }
         }
 

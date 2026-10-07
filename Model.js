@@ -197,10 +197,6 @@ function previewCommand(on) {
     return command(["preview", on ? "on" : "off"]);
 }
 
-// How often the panel re-reads the preview file. The daemon publishes about ten
-// a second; asking much faster only re-decodes the same JPEG.
-var PREVIEW_INTERVAL_MS = 100;
-
 function blurCommand(radius) {
     return command(["blur", String(clampBlur(radius))]);
 }
@@ -641,7 +637,6 @@ if (typeof module !== "undefined" && module.exports) {
         effectCommand: effectCommand,
         blurCommand: blurCommand,
         previewCommand: previewCommand,
-        PREVIEW_INTERVAL_MS: PREVIEW_INTERVAL_MS,
         isEffect: isEffect,
         clampBlur: clampBlur,
         unknownState: unknownState,

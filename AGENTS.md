@@ -591,8 +591,27 @@ second one's `REQBUFS` invalidates the first one's buffer pool: measured here, a
 reader joining a device another reader was already streaming produced `Failed to
 allocate a buffer` **in the one that was already working**. So the preview
 cannot be a `QtMultimedia` `Camera` on the output device, however much shorter
-that code would be. The daemon publishes a 320x180 JPEG to `$XDG_RUNTIME_DIR`
+that code would be. The daemon publishes a JPEG to `$XDG_RUNTIME_DIR`
 instead, which contends with nothing.
+
+**Preview pixels are physical pixels; panel dimensions are logical pixels.**
+The original 320x180, quality-70 JPEG threw away detail before the widget could
+show it. On this machine's 2x display it was then stretched over more than 500
+physical pixels across: the 1080p camera was working, but the preview of it was
+soft. Making a panel only a few centimetres wide does not justify a thumbnail
+that undersamples its display.
+
+The preview now keeps up to 1920 pixels across, at JPEG quality 95 with the
+accurate integer DCT, and never upscales a smaller camera. Lanczos handles the
+daemon's reduction and the QML images use mipmap filtering for the final display
+size. A 1920x1080 output therefore keeps its full dimensions without resampling
+in the daemon; the original 1280-pixel limit still discarded a third of the
+camera's pixels along each axis. The source aspect ratio determines the encoded
+height. JPEG is still lossy: matching dimensions is not a pixel-identical copy.
+`preview_preserves_fine_luma_detail` encodes and decodes a high-frequency luma
+pattern at both 720p and 1080p and requires less than two levels of mean error;
+a second pipeline test checks the real JPEG's dimensions, including 4:3,
+smaller sources, and reducing a larger source to the 1920-pixel ceiling.
 
 Requests for it follow the **daemon appearing**, not the panel opening. Sending
 it once from `Panel.open()` is the obvious thing and it is wrong: the power
@@ -603,25 +622,102 @@ because none was requested -- which reads as the preview being broken rather
 than as never having been asked for, and closing and reopening "fixes" it,
 which points the investigation at the panel instead of the request.
 
-It is written to a temporary name and `rename(2)`d into place, because the
-widget re-reads the file on a timer: rename is atomic within a filesystem, so a
-reader gets the previous whole frame or the next whole frame, never half of one.
+It is written to a temporary name and `rename(2)`d into place: rename is atomic
+within a filesystem, so a reader gets the previous whole frame or the next whole
+frame, never half of one.
 It is published only while a panel is open — the widget asks on open and again
 on close — and the encoder is built on first use and dropped when nothing is
 watching, taking the last frame with it, so a widget can never show a still of a
 camera that is no longer running. A frame left behind by a daemon that was
 killed rather than stopped is removed at the next start.
 
+**Preview cadence follows the camera's frames, not a timer.** Every composited
+frame is offered while the panel is open. The old 100 ms encoder throttle and
+100 ms widget poll capped the preview at 10 fps even on a 30 fps camera. Both
+are gone. The panel uses `FileView` with `preload: false` to watch the JPEG,
+including creation and atomic replacement, without reading it a second time.
+`Image` still decodes it asynchronously into the hidden half of the pair. If
+another frame arrives during a decode, remember that a newer file is pending
+and load it after the current decode completes; restarting each load can keep
+a slow decoder from ever displaying anything. File notifications that land in
+the same event-loop turn are coalesced with `Qt.callLater`.
+
+This follows delivered frames even when low light slows the camera without
+changing its advertised 30 fps caps. Do not replace it with a hardcoded 30 fps
+timer: that still undersamples faster sources and re-decodes slower ones.
+
 It must never wait for the encoder, either. `offer` collects the JPEG finished
-since the last interval and hands over this frame for next time, so the preview
-runs a tenth of a second behind and the frame loop does not stop for it.
+since the last camera frame and hands over this frame for next time, so the
+preview runs about one delivered frame behind. `appsrc` holds at most one queued
+frame, drops the oldest queued frame on overflow, and never blocks the camera
+loop. A slow encoder therefore loses preview frames instead of accumulating
+latency and memory. The stuck-encoder deadline is two wall-clock seconds,
+independent of FPS. `preview_offers_every_source_frame_without_timer_throttling`
+checks fractional/24/60 fps caps and irregular input timestamps, and
+`slow_preview_encoding_keeps_only_the_newest_queued_frame` holds a streaming
+buffer while 127 newer frames arrive, then checks the bounded queue and newest
+timestamp when the encoder resumes.
+
 Waiting, which is what it did first, held the loop 1.1 ms at 720p and 2.8 ms at
 1080p on every third frame the panel was open. This file once called that
 "inside the noise", measured with the timing line -- which does not time the
 preview at all. `cargo run --release --example preview_cost` times `offer`
-itself: 0.2 ms held now, and 1.2 ms of CPU per encode on GStreamer's thread,
-down from 2.7 at 1080p, because the frame is scaled before anything else touches
-it and `jpegenc` takes NV12 as it is.
+itself. The low-resolution preview held about 0.2 ms and cost 1.2 ms of CPU per
+encode, down from 2.7 at 1080p, because the frame is scaled before anything else
+touches it and `jpegenc` takes NV12 as it is.
+
+Measured for the 1280-pixel preview on 2026-10-06, this machine on AC with the `powersave` governor,
+the example's synthetic frame, 60 offers at 10 fps, baseline x86-64 release
+build. The extra quality costs CPU only while the panel is open, and the worker
+still never holds the frame loop for the encode:
+
+| source | old held median / worst | new held median / worst | old CPU / encode | new CPU / encode |
+|---|---|---|---|---|
+| 1280x720 | 0.17 / 0.26 ms | 0.82 / 1.02 ms | 1.00 ms | 12.33 ms |
+| 1920x1080 | 0.16 / 0.23 ms | 0.44 / 0.86 ms | 1.17 ms | 11.50 ms |
+
+At 10 fps the new encoder costs about 12% of one core on this synthetic frame.
+This is not a measurement of the camera's image, Qt's decoder/rendering cost,
+or battery power. Closing the panel still drops the encoder entirely.
+
+For the 1920-pixel preview with the former 10 fps throttle, re-measured on
+2026-10-07 with the same command,
+AC and governor, the synthetic 720p source held the frame loop 0.42 ms median /
+1.22 ms worst and cost 7.00 ms of CPU per encode; the native 1080p source held
+it 1.52 / 1.93 ms and cost 20.33 ms of CPU per encode. That is about 20% of one
+core at 10 fps for the synthetic full-HD preview, only while the panel is open.
+These are separate runs rather than a controlled comparison: even the unchanged
+720p path's timings moved with the machine's load and clock. They do not include
+Qt's decoding and rendering, and are not a battery-power measurement.
+
+After removing the throttle, `preview_cost` defaults to a 30 fps source and
+accepts its FPS as an argument. On 2026-10-07, AC and the `powersave` governor,
+the synthetic frame, release build, five warm-up frames and two seconds of
+measured offers per size:
+
+| command's FPS | source | held median / worst | CPU / offer | JPEGs published |
+|---|---|---|---|---|
+| 30 | 1280x720 | 0.38 / 0.90 ms | 6.17 ms | 60 / 60 |
+| 30 | 1920x1080 | 0.93 / 1.74 ms | 15.33 ms | 60 / 60 |
+| 60 | 1280x720 | 0.39 / 0.68 ms | 6.50 ms | 120 / 120 |
+| 60 | 1920x1080 | 0.88 / 1.41 ms | 9.75 ms | 120 / 120 |
+
+Reproduce with `cargo run --offline --release --example preview_cost -- 30`
+and `-- 60` in `daemon/`. Published counts come from changes to the real JPEG's
+mtime, not from counting calls to `offer`. CPU includes the worker; frame-loop
+time does not wait for it. Different cadences change load and clocks, so the
+per-offer costs are not a controlled comparison. These short runs exclude
+Qt's decoding/rendering and do not measure battery power.
+
+Live verification on the configured USB camera, NPU matting, 1920x1080 with the
+updated panel open: 180 processed source frames and 181 atomic JPEG publications
+over 6.007 seconds, about 30 fps each (one frame of counting-boundary skew).
+Source frames were counted from `--stats-every 1`; JPEGs from `IN_MOVED_TO` on
+the runtime directory, without opening Studio Camera as a reader. The real
+panel was opened and inspected. An offscreen Quickshell probe of its preview
+item also decoded high-detail 1080p JPEG replacements at 24/30/60 fps and
+recovered when the file was deleted and recreated. This verifies throughput,
+not an end-to-end latency or battery-power figure.
 
 **Voice focus is on the CPU on purpose, and that is the interesting part.** The
 NPU thesis does not transfer to audio. Segmentation was worth moving because it
