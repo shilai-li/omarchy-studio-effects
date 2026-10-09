@@ -276,9 +276,6 @@ BarWidget {
     if ("hostWidget" in target) target.hostWidget = root
   }
 
-  readonly property real openPanelIndicatorWidth: button.labelWidth
-  readonly property real openPanelIndicatorHeight: Math.max(Style.space(10), Math.round(Style.bar.iconSlot * 0.55))
-
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
 
@@ -514,17 +511,18 @@ BarWidget {
     function status(): string { return root.statusJson() }
   }
 
-  WidgetButton {
+  // Same glyph and button the shell's own icon widgets use: BarIconButton
+  // centers the ink optically, and the open-panel mark takes the shell's default.
+  BarIconButton {
     id: button
     anchors.fill: parent
     bar: root.bar
     text: root.glyph
     // Active if anything the widget controls is on. With one glyph for both
     // halves, a microphone filter running while the camera is off still has to
-    // look like something is happening.
-    active: root.opened || root.effectsOn || root.voice === "on"
-    horizontalMargin: 8.75
-    verticalPadding: 8.75
+    // look like something is happening. The open panel does not count: opening
+    // it marks the bar with the underline, not with a color change.
+    active: root.effectsOn || root.voice === "on"
     tooltipText: Model.tooltipFor(root.state, root.voice, root.installed)
 
     onPressed: function(b) { root.togglePanel() }
