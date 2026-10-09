@@ -1232,3 +1232,8 @@ for that reason; don't re-add it as "the original".
    built-ins emit the same noise outside Quickshell), `bash test/model-test.sh`
    green, and the panel actually opened and looked at. All four have caught
    something the others did not.
+7. Palette colours are `Commons.Color.<token>`, never a bare `Color.<token>`.
+   Qt 6.12 ships its own `Color` type, so the bare name resolves to that and
+   reads come back `undefined` with no load-time error. Pair `import qs.Commons`
+   with `import qs.Commons as Commons`, as `docs/omarchy-shell.md` ("Theme
+   tokens") requires. `Style` and `Util` stay on the unqualified import.
