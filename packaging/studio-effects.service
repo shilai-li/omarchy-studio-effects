@@ -1,0 +1,78 @@
+# The daemon itself, as a user service.
+#
+# Deliberately not enabled by default. While this runs it holds the camera
+# open: the recording light stays lit, nothing else can open the real camera,
+# and every frame is segmented and composited whether or not anyone is
+# watching. The bar widget starts and stops it on demand, which is what the
+# on/off switch actually does -- `effect none` only stops the compositing.
+# Enable it yourself if you would rather it were always up.
+#
+# A user unit, not a system one: it reads the user's camera and follows their
+# session, and there is nothing here that wants root. Note that this means
+# SupplementaryGroups= is unavailable -- the user manager has no privilege to
+# change credentials -- so NPU access rests on the permissions of
+# /dev/accel/accel0 rather than on this unit. See AGENTS.md; if the daemon
+# reports falling back to the GPU, that is what to look at.
+
+[Unit]
+Description=Studio Effects camera daemon
+Documentation=https://github.com/shilai-li/omarchy-studio-effects
+After=studio-effects-loopback.service
+
+[Service]
+Type=simple
+
+# Defaults, overridable per user without editing this file.
+Environment=INPUT=/dev/video0
+Environment=WIDTH=0
+Environment=HEIGHT=0
+Environment=FPS=0
+Environment=HOLD_FRAMERATE=on
+Environment=CAPTURE_WIDTH=0
+Environment=CAPTURE_HEIGHT=0
+Environment=MODEL=matting
+Environment=BLUR=20
+Environment=PASSES=1
+Environment=DIM=0
+Environment=DESAT=0
+Environment=FRAMING=off
+Environment=FRAMING_ZOOM=200
+Environment=EFFECT=blur
+Environment=BACKGROUND=
+Environment=BACKGROUND_DIR=
+Environment=MASK_GAIN=3.0
+Environment=MASK_SMOOTHING=0.5
+EnvironmentFile=-%h/.config/studio-effects.conf
+
+# ${VAR} rather than $VAR: a card label like "FHD Camera: FHD Camera" contains
+# spaces and must stay one argument.
+ExecStart=/usr/bin/studio-effects-daemon \
+    --input ${INPUT} \
+    --output "Studio Camera" \
+    --width ${WIDTH} \
+    --height ${HEIGHT} \
+    --fps ${FPS} \
+    --hold-framerate=${HOLD_FRAMERATE} \
+    --capture-width ${CAPTURE_WIDTH} \
+    --capture-height ${CAPTURE_HEIGHT} \
+    --blur ${BLUR} \
+    --passes ${PASSES} \
+    --dim ${DIM} \
+    --desat ${DESAT} \
+    --framing=${FRAMING} \
+    --framing-zoom ${FRAMING_ZOOM} \
+    --effect ${EFFECT} \
+    --background ${BACKGROUND} \
+    --background-dir ${BACKGROUND_DIR} \
+    --mask-gain ${MASK_GAIN} \
+    --mask-smoothing ${MASK_SMOOTHING} \
+    --model ${MODEL} \
+    --cache %C/studio-effects \
+    --stats-every 0
+
+CacheDirectory=studio-effects
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,638 @@
+// Run with: bash test/model-test.sh
+const M = require("../Model.js")
+
+let passed = 0
+const failures = []
+
+function check(name, fn) {
+  try { fn(); passed++ } catch (e) { failures.push(name + "\n    " + e.message) }
+}
+
+function eq(actual, expected, what) {
+  const a = JSON.stringify(actual)
+  const b = JSON.stringify(expected)
+  if (a !== b) throw new Error((what || "value") + ": expected " + b + ", got " + a)
+}
+
+function ok(cond, what) {
+  if (!cond) throw new Error(what || "expected true")
+}
+
+const REPLY = '{"effect":"blur","blur":12,"device":"NPU","input":"/dev/video0",' +
+              '"output":"/dev/video10","width":1280,"height":720,"background":false}'
+
+// ---- Commands. Nothing is ever spliced into a command line.
+
+check("the binary is named absolutely, never found on PATH", () => {
+  ok(M.BINARY.startsWith("/"), "BINARY should be an absolute path")
+  eq(M.statusCommand(), [M.BINARY, "status"])
+})
+
+check("arguments stay separate argv entries", () => {
+  eq(M.effectCommand("replace"), [M.BINARY, "effect", "replace"])
+  eq(M.blurCommand(40), [M.BINARY, "blur", "40"])
+})
+
+check("an effect the daemon does not know is refused here, not sent", () => {
+  eq(M.effectCommand("banana"), null)
+  eq(M.effectCommand("blur; rm -rf ~"), null)
+})
+
+check("blur is clamped before it is sent", () => {
+  eq(M.blurCommand(9999), [M.BINARY, "blur", "200"])
+  eq(M.blurCommand(-5), [M.BINARY, "blur", "0"])
+  eq(M.blurCommand("nonsense"), [M.BINARY, "blur", "20"])
+})
+
+// ---- Starting and stopping the daemon. This, not `effect none`, is what
+//      releases the camera.
+
+check("the unit is started and stopped by absolute path", () => {
+  ok(M.SYSTEMCTL.startsWith("/"), "systemctl should be an absolute path")
+  eq(M.startCommand(), [M.SYSTEMCTL, "--user", "start", M.UNIT])
+  eq(M.stopCommand(), [M.SYSTEMCTL, "--user", "stop", M.UNIT])
+})
+
+check("it is a user unit, never a system one", () => {
+  ok(M.startCommand().indexOf("--user") !== -1, "start should be --user")
+  ok(M.stopCommand().indexOf("--user") !== -1, "stop should be --user")
+})
+
+check("off says the camera is released, not merely that effects are off", () => {
+  eq(M.powerLabel(M.notRunningState()), "Off")
+  eq(M.powerLabel({ running: true }), "On")
+  ok(M.powerHint(M.notRunningState()).indexOf("released") !== -1)
+  ok(M.powerHint({ running: true }).indexOf("open") !== -1)
+})
+
+// ---- Voice focus. A separate unit, asked of systemd rather than the daemon.
+
+check("voice focus is its own unit, started by absolute path", () => {
+  ok(M.VOICE_UNIT !== M.UNIT, "voice must not be the camera unit")
+  eq(M.voiceCommand(true), [M.SYSTEMCTL, "--user", "start", M.VOICE_UNIT])
+  eq(M.voiceCommand(false), [M.SYSTEMCTL, "--user", "stop", M.VOICE_UNIT])
+  eq(M.voiceStatusCommand()[0], M.SYSTEMCTL)
+  ok(M.voiceStatusCommand().indexOf(M.VOICE_UNIT) !== -1, "must name the voice unit")
+})
+
+check("systemd's two lines are reduced to on, off or missing", () => {
+  eq(M.parseVoiceState("loaded\nactive\n"), "on")
+  eq(M.parseVoiceState("loaded\nactivating\n"), "on")
+  eq(M.parseVoiceState("loaded\ninactive\n"), "off")
+  eq(M.parseVoiceState("loaded\nfailed\n"), "off")
+})
+
+check("a unit that does not exist is missing, not merely off", () => {
+  // This is why LoadState is asked for at all. `is-active` prints "inactive"
+  // for a unit that does not exist -- the same word as for one that is simply
+  // stopped -- so a widget reading that alone offers a switch for a package
+  // that was never installed.
+  eq(M.parseVoiceState("not-found\ninactive\n"), "missing")
+  eq(M.parseVoiceState(""), "missing", "no reply at all")
+  eq(M.parseVoiceState("loaded"), "missing", "a truncated reply is not trusted")
+})
+
+check("the status command asks for the load state, not just is-active", () => {
+  const cmd = M.voiceStatusCommand()
+  ok(cmd.indexOf("LoadState") !== -1, "must ask LoadState: " + cmd.join(" "))
+  ok(cmd.indexOf("is-active") === -1, "is-active cannot answer this")
+})
+
+// ---- Parsing. Every reply carries the whole state, so this is the only
+//      place a reply is ever interpreted.
+
+check("a normal reply is read", () => {
+  const s = M.parseStatus(REPLY)
+  ok(s.ok && s.running, "should be running")
+  eq(s.effect, "blur", "effect")
+  eq(s.blur, 12, "blur")
+  eq(s.device, "NPU", "device")
+  eq(s.error, "", "error")
+})
+
+check("a refusal is carried through, not dropped", () => {
+  const s = M.parseStatus('{"effect":"blur","blur":12,"error":"no background image was loaded"}')
+  ok(s.ok, "still a valid reply")
+  ok(s.error.length > 0, "the reason should survive")
+  eq(s.effect, "blur", "and the effect is what the daemon says, not what was asked for")
+})
+
+check("garbage never reads as effects being on", () => {
+  for (const bad of ["", "not json", "[]", "null", '{"effect":"banana"}', "x".repeat(9000)]) {
+    const s = M.parseStatus(bad)
+    eq(s.effect, "none", "effect for " + JSON.stringify(bad.slice(0, 20)))
+  }
+})
+
+check("a missing daemon is not running, and shows no effect", () => {
+  const s = M.notRunningState()
+  ok(!s.running, "should not be running")
+  eq(s.effect, "none", "effect")
+})
+
+// ---- The live preview.
+
+check("preview is asked for explicitly in both directions", () => {
+  eq(M.previewCommand(true), [M.BINARY, "preview", "on"])
+  eq(M.previewCommand(false), [M.BINARY, "preview", "off"])
+})
+
+check("the preview carries the panel's size in physical pixels", () => {
+  eq(M.previewCommand(true, 720, 405), [M.BINARY, "preview", "on", "720x405"])
+  eq(M.previewCommand(true, 360, 202.5, 2), [M.BINARY, "preview", "on", "720x405"])
+  // Off never needs a size, and a size that is not one is left off.
+  eq(M.previewCommand(false, 720, 405), [M.BINARY, "preview", "off"])
+  for (const [w, h] of [[0, 405], [720, NaN], [720.5, 405], [-1, 1], [99999, 1], ["720", "405"], [undefined, undefined]])
+    eq(M.previewCommand(true, w, h), [M.BINARY, "preview", "on"], JSON.stringify([w, h]))
+})
+
+check("a fractional scale rounds the preview up, never down", () => {
+  eq(M.previewSize(360, 202.5, 2), "720x405")
+  eq(M.previewSize(360, 202.5, 1.25), "450x254")
+  eq(M.previewSize(360, 202.5, 1.5), "540x304")
+  eq(M.previewSize(0, 0, 2), "")
+})
+
+check("the preview path comes from the daemon, never rebuilt here", () => {
+  const s = M.parseStatus('{"effect":"blur","preview":true,"previewPath":"/run/user/1000/x.jpg"}')
+  eq(s.preview, true, "preview")
+  eq(s.previewPath, "/run/user/1000/x.jpg", "previewPath")
+})
+
+check("a reply with no preview fields never claims a path", () => {
+  const s = M.parseStatus(REPLY)
+  eq(s.preview, false, "preview")
+  eq(s.previewPath, "", "previewPath")
+  eq(M.notRunningState().previewPath, "", "previewPath when stopped")
+})
+
+// ---- Adjustable settings.
+
+check("only settings the current effect uses are offered", () => {
+  // Built through parseStatus rather than by hand: panelRows only offers what
+  // the daemon reported, so a hand-made state would silently offer nothing.
+  const all = '"blur":12,"passes":2,"dim":0,"desat":0'
+  const kinds = json => M.panelRows(M.parseStatus(json)).map(r => r.kind + ":" + (r.effect || r.key))
+
+  // Nothing to adjust when effects are off. (And no image, so the replace hint.)
+  eq(kinds('{"effect":"none",' + all + '}'), ["effect:none", "effect:blur", "hint:replace"])
+
+  // Replace has no blur to soften, so no blur or smoothness rows.
+  const rep = kinds('{"effect":"replace","background":true,' + all + '}')
+  ok(rep.indexOf("param:blur") === -1, "replace should not offer blur: " + rep)
+  ok(rep.indexOf("param:dim") !== -1, "replace should offer darken: " + rep)
+
+  // Blur offers all four.
+  const bl = kinds('{"effect":"blur",' + all + '}')
+  for (const k of ["param:blur", "param:passes", "param:dim", "param:desat"])
+    ok(bl.indexOf(k) !== -1, k + " missing from " + bl)
+})
+
+check("every setting is clamped to the daemon's range before being sent", () => {
+  eq(M.paramCommand("passes", 9), [M.BINARY, "passes", "3"])
+  eq(M.paramCommand("passes", 0), [M.BINARY, "passes", "1"])
+  eq(M.paramCommand("dim", 500), [M.BINARY, "dim", "100"])
+  eq(M.paramCommand("desat", -20), [M.BINARY, "desat", "0"])
+  eq(M.paramCommand("blur", 9999), [M.BINARY, "blur", "200"])
+})
+
+check("an unknown setting is refused here, not sent", () => {
+  eq(M.paramCommand("banana", 1), null)
+  eq(M.paramCommand("effect", "none"), null)
+})
+
+check("stepping stays inside the range and moves by the right amount", () => {
+  eq(M.stepParam({ passes: 2 }, "passes", 1), 3)
+  eq(M.stepParam({ passes: 3 }, "passes", 1), 3, "clamped at the top")
+  eq(M.stepParam({ dim: 0 }, "dim", -1), 0, "clamped at the bottom")
+  eq(M.stepParam({ dim: 50 }, "dim", 1), 60)
+})
+
+check("smoothness displays extra passes while commands preserve total passes", () => {
+  for (const passes of [1, 2, 3]) {
+    const state = M.parseStatus(JSON.stringify({effect: "blur", passes}))
+    eq(M.paramDisplayValue(state, "passes"), passes - 1)
+    eq(M.paramCommand("passes", M.paramValue(state, "passes")),
+       [M.BINARY, "passes", String(passes)])
+  }
+  eq(M.paramDisplayValue(M.notRunningState(), "passes"), 0)
+  eq(M.paramDisplayValue({dim: 40}, "dim"), 40)
+})
+
+check("a daemon that does not report a setting is not offered rows for it", () => {
+  // An older daemon: knows blur, has never heard of passes, dim or desat.
+  const old = M.parseStatus('{"effect":"blur","blur":12}')
+  const keys = M.panelRows(old).filter(r => r.kind === "param").map(r => r.key)
+  eq(keys, ["blur"], "only settings the daemon reports should appear")
+
+  // A current one offers all four.
+  const now = M.parseStatus('{"effect":"blur","blur":12,"passes":2,"dim":0,"desat":0}')
+  eq(M.panelRows(now).filter(r => r.kind === "param").map(r => r.key),
+     ["blur", "passes", "dim", "desat"])
+})
+
+check("a stopped daemon offers no settings at all", () => {
+  eq(M.panelRows(M.notRunningState()).filter(r => r.kind === "param").length, 0)
+})
+
+check("the resolution reaches the panel, which is the only place it shows", () => {
+  const s = M.parseStatus(REPLY)
+  eq(s.width, 1280, "width")
+  eq(s.height, 720, "height")
+  // A reply without them must not put "undefined" on screen.
+  const bare = M.parseStatus('{"effect":"blur"}')
+  eq(bare.width, 0, "width")
+  eq(M.notRunningState().height, 0, "height when stopped")
+})
+
+check("the daemon's values are read back, not defaulted", () => {
+  const s = M.parseStatus('{"effect":"blur","blur":30,"passes":3,"dim":45,"desat":80}')
+  eq(M.paramValue(s, "blur"), 30, "blur")
+  eq(M.paramValue(s, "passes"), 3, "passes")
+  eq(M.paramValue(s, "dim"), 45, "dim")
+  eq(M.paramValue(s, "desat"), 80, "desat")
+})
+
+check("a reported setting is marked supported, an absent one is not", () => {
+  const s = M.parseStatus('{"effect":"blur","blur":12,"passes":2}')
+  eq(s.supports.blur, true, "blur")
+  eq(s.supports.passes, true, "passes")
+  eq(s.supports.dim, false, "dim absent means unsupported")
+})
+
+check("every adjustable setting survives a round trip through parseStatus", () => {
+  // The panel reads each PARAMS entry off the parsed state, so a setting the
+  // daemon reports and the parser drops shows as a slider stuck at its minimum.
+  const json = '{"effect":"blur","blur":66,"passes":3,"dim":10,"desat":20}'
+  const s = M.parseStatus(json)
+  for (const p of M.PARAMS)
+    ok(typeof s[p.key] === "number", p.key + " missing from parsed state")
+})
+
+check("a reply missing a setting reads as its minimum, never as garbage", () => {
+  const s = M.parseStatus('{"effect":"blur"}')
+  eq(M.paramValue(s, "passes"), 1, "passes")
+  eq(M.paramValue(s, "dim"), 0, "dim")
+})
+
+check("the cursor opens on the effect that is on, counting param rows", () => {
+  const st = M.parseStatus('{"effect":"blur","blur":12,"passes":2,"dim":0,"desat":0}')
+  const rows = M.panelRows(st)
+  eq(rows[M.indexOfEffect(st, rows)].effect, "blur")
+})
+
+// ---- Auto framing.
+
+check("zoom is offered only while framing is on", () => {
+  const all = '"blur":12,"passes":2,"dim":0,"desat":0,"zoom":200'
+  const keys = json => M.panelRows(M.parseStatus(json)).filter(r => r.kind === "param").map(r => r.key)
+
+  // Framing off: a zoom slider would adjust something with no visible effect.
+  ok(keys('{"effect":"blur","framing":false,' + all + '}').indexOf("zoom") === -1,
+     "zoom must be hidden while framing is off")
+  ok(keys('{"effect":"blur","framing":true,' + all + '}').indexOf("zoom") !== -1,
+     "zoom must appear once framing is on")
+})
+
+check("zoom is clamped to what the daemon accepts", () => {
+  eq(M.paramCommand("zoom", 500), [M.BINARY, "zoom", "300"])
+  eq(M.paramCommand("zoom", 10), [M.BINARY, "zoom", "100"])
+  eq(M.stepParam({ zoom: 300 }, "zoom", 1), 300, "clamped at the top")
+})
+
+check("framing is offered with the effects, not under one of them", () => {
+  // Worth having with no background effect at all.
+  const off = M.parseStatus('{"effect":"none","blur":12,"framing":false}')
+  const keys = M.panelRows(off).map(r => r.kind + ":" + (r.effect || r.key))
+  ok(keys.indexOf("toggle:framing") !== -1, "framing missing with effects off: " + keys)
+})
+
+check("a daemon that does not report framing is not offered it", () => {
+  const older = M.parseStatus('{"effect":"blur","blur":12}')
+  eq(M.panelRows(older).filter(r => r.kind === "toggle").length, 0)
+})
+
+check("framing is sent as on or off, never as a number", () => {
+  eq(M.toggleCommand("framing", true), [M.BINARY, "framing", "on"])
+  eq(M.toggleCommand("framing", false), [M.BINARY, "framing", "off"])
+  eq(M.toggleCommand("banana", true), null)
+})
+
+check("framing state is read back from the daemon", () => {
+  eq(M.toggleValue(M.parseStatus('{"effect":"blur","framing":true}'), "framing"), true)
+  eq(M.toggleValue(M.parseStatus('{"effect":"blur","framing":false}'), "framing"), false)
+  eq(M.toggleValue(M.notRunningState(), "framing"), false, "a stopped daemon frames nothing")
+})
+
+// ---- What the bar shows.
+
+check("one glyph covers the whole plugin, camera and microphone alike", () => {
+  // A camera icon described half of what this widget controls once it also
+  // switched the microphone filter.
+  const seen = new Set(["blur", "replace", "none"].map(e => M.glyphFor({ running: true, effect: e })))
+  seen.add(M.glyphFor(M.notRunningState()))
+  eq(seen.size, 1, "the glyph must not change with state")
+  eq([...seen][0], M.GLYPH)
+})
+
+check("the tooltip carries the state the glyph no longer does", () => {
+  // Both halves, because one icon cannot say which of them is on.
+  const on = M.tooltipFor(M.parseStatus(REPLY), "on")
+  ok(on.indexOf("blur") !== -1, "should name the camera effect: " + on)
+  ok(on.indexOf("voice focus on") !== -1, "should name voice focus: " + on)
+
+  const camOff = M.tooltipFor(M.notRunningState(), "on")
+  ok(camOff.indexOf("camera effects off") !== -1, camOff)
+  ok(camOff.indexOf("voice focus on") !== -1, "a filter running with the camera off must show: " + camOff)
+
+  // A missing voice unit is not mentioned at all rather than called "off".
+  ok(M.tooltipFor(M.parseStatus(REPLY), "missing").indexOf("voice focus") === -1)
+})
+
+// ---- Choices offered.
+
+check("replace is offered only when an image is actually loaded", () => {
+  eq(M.availableEffects({ background: false }), ["none", "blur"])
+  eq(M.availableEffects({ background: true }), ["none", "blur", "replace"])
+  eq(M.availableEffects(null), ["none", "blur"])
+})
+
+check("the cursor lands on the current effect, and survives one that is hidden", () => {
+  const st = M.parseStatus('{"effect":"blur","blur":12,"passes":2,"dim":0,"desat":0}')
+  const rows = M.panelRows(st)
+  eq(rows[M.indexOfEffect(st, rows)].effect, "blur")
+  // An effect not on offer (replace with no image) must not point off the list.
+  const hidden = M.panelRows(M.parseStatus('{"effect":"replace","blur":12}'))
+  ok(M.indexOfEffect({ effect: "replace" }, hidden) < hidden.length, "index must stay in range")
+})
+
+check("stepping blur stays inside the daemon's range", () => {
+  eq(M.stepBlur({ blur: 12 }, 1), 12 + M.BLUR_STEP)
+  eq(M.stepBlur({ blur: M.BLUR_MAX }, 1), M.BLUR_MAX)
+  eq(M.stepBlur({ blur: 0 }, -1), 0)
+})
+
+// ---- The model row.
+
+const TWO = '{"effect":"blur","blur":12,"passes":1,"dim":0,"desat":0,' +
+            '"model":"matting","models":["matting","segmentation"]}'
+
+check("the model and the installed list are read out of the reply", () => {
+  const st = M.parseStatus(TWO)
+  eq(st.model, "matting")
+  eq(st.models, ["matting", "segmentation"])
+})
+
+check("the model row appears only when there is something to switch to", () => {
+  const kinds = (json) => M.panelRows(M.parseStatus(json))
+      .filter((r) => r.kind === "choice").map((r) => r.key)
+  eq(kinds(TWO), ["model"])
+  // One installed model is not a choice, and a row that cycles back to what is
+  // already on is a control that does nothing.
+  eq(kinds('{"effect":"blur","model":"matting","models":["matting"]}'), [])
+  // A daemon too old to report either says nothing, and gets no row.
+  eq(kinds('{"effect":"blur","blur":12}'), [])
+})
+
+check("stepping the model wraps and never leaves the installed list", () => {
+  const st = M.parseStatus(TWO)
+  eq(M.stepChoice(st, "model", 1), "segmentation")
+  eq(M.stepChoice(st, "model", -1), "segmentation")
+  eq(M.stepChoice({ model: "segmentation", models: ["matting", "segmentation"] }, "model", 1),
+     "matting")
+  // A daemon running a model it did not list -- installed from elsewhere, or
+  // renamed underneath us -- still steps somewhere real rather than nowhere.
+  eq(M.stepChoice({ model: "gone", models: ["matting", "segmentation"] }, "model", 1), "matting")
+  eq(M.stepChoice({ model: "matting", models: [] }, "model", 1), "")
+})
+
+check("the model command names the model, and refuses to name nothing", () => {
+  eq(M.choiceCommand("model", "segmentation"), [M.BINARY, "model", "segmentation"])
+  eq(M.choiceCommand("model", ""), null)
+  eq(M.choiceCommand("nonsense", "segmentation"), null)
+})
+
+// ---- Whether the daemon exists, and how setup is started.
+
+check("installed is asked of the filesystem by absolute path", () => {
+  ok(M.DAEMON.startsWith("/") && M.TEST.startsWith("/"), "both named absolutely")
+  eq(M.installedCommand(), [M.TEST, "-x", M.DAEMON])
+})
+
+check("only a clean yes or no decides installed; anything else is unknown", () => {
+  eq(M.parseInstalled(0), "yes")
+  eq(M.parseInstalled(1), "no")
+  // Could not run, or was killed: that says nothing about the daemon, and
+  // "not installed" would offer to reinstall something that is there.
+  for (const code of [-1, 2, 126, 127, 137, null, undefined]) eq(M.parseInstalled(code), "unknown")
+})
+
+check("setup is started through a fixed shell with the path as an argument", () => {
+  const script = "/home/x/.config/omarchy/plugins/p/packaging/setup.sh"
+  const argv = M.setupLaunch(script)
+  eq(argv[0], "/usr/bin/bash")
+  eq(argv[1], "-c")
+  eq(argv[argv.length - 1], script)
+  // The path is data. It must not appear in the script text, or a path with a
+  // quote or a space in it becomes code.
+  ok(argv[2].indexOf(script) === -1, "the script text must not contain the path")
+  ok(argv[2].indexOf("$1") !== -1, "and reads it as $1")
+})
+
+check("a hostile path is passed through untouched, not interpreted", () => {
+  const nasty = "/tmp/a b/$(touch pwned)/`id`/x'y\"z/setup.sh"
+  const argv = M.setupLaunch(nasty)
+  eq(argv[argv.length - 1], nasty)
+  ok(argv[2].indexOf("touch pwned") === -1 && argv[2].indexOf("`id`") === -1, "nothing spliced in")
+})
+
+check("setup refuses a path that is empty, relative or not a string", () => {
+  for (const bad of ["", "setup.sh", "./setup.sh", "../setup.sh", null, undefined, 42, {}])
+    eq(M.setupLaunch(bad), null)
+})
+
+check("each setup choice reaches the terminal as a fixed argument", () => {
+  const script = "/tmp/plugin with spaces/packaging/setup.sh"
+  for (const method of ["release", "build"]) {
+    const argv = M.setupLaunch(script, method)
+    eq(argv.slice(-2), [script, "--" + method])
+    ok(argv[2].indexOf(script) === -1)
+  }
+  for (const bad of ["--release", "release; touch pwned", null, 42])
+    eq(M.setupLaunch(script, bad), null)
+})
+
+check("prebuilt availability requires the supported published package", () => {
+  const asset = {name: "omarchy-studio-effects-0.1.0-4-x86_64.pkg.tar.zst", state: "uploaded",
+    browser_download_url: "https://github.com/shilai-li/omarchy-studio-effects/releases/download/v0.1.0/omarchy-studio-effects-0.1.0-4-x86_64.pkg.tar.zst"}
+  const release = {draft: false, prerelease: true, tag_name: "v0.1.0", assets: [asset]}
+  const response = obj => JSON.stringify(obj) + "\n200"
+  eq(M.parsePrebuilt(0, response(release)), "available")
+  eq(M.parsePrebuilt(0, response({...release, draft: true})), "unavailable")
+  eq(M.parsePrebuilt(0, response({...release, tag_name: "v0.2.0"})), "unavailable")
+  eq(M.parsePrebuilt(0, response({...release, assets: []})), "unavailable")
+  eq(M.parsePrebuilt(0, response({...release, assets: [{...asset, state: "new"}]})), "unavailable")
+  eq(M.parsePrebuilt(0, response({...release, assets: [{...asset, browser_download_url: "https://example.com/file"}]})), "unavailable")
+})
+
+check("missing releases and failed checks stay unavailable with distinct hints", () => {
+  eq(M.parsePrebuilt(0, '{"message":"Not Found"}\n404'), "unavailable")
+  eq(M.parsePrebuilt(28, "\n000"), "unknown")
+  eq(M.parsePrebuilt(0, '{"message":"rate limited"}\n403'), "unknown")
+  eq(M.parsePrebuilt(0, "not json\n200"), "unknown")
+  ok(M.prebuiltHint("unavailable").includes("no release is currently published"))
+  ok(M.prebuiltHint("unknown").includes("Press r to retry"))
+  ok(M.prebuiltHint("checking").includes("Checking"))
+})
+
+check("the launchers are found on a fixed PATH, not the inherited one", () => {
+  const s = M.LAUNCH_SCRIPT
+  ok(s.indexOf("PATH=/usr/share/omarchy/bin:/usr/bin:/bin") !== -1, "trusted() sets PATH itself")
+  ok(s.indexOf("omarchy-launch-floating-terminal-with-presentation") !== -1, "prefers Omarchy's own")
+  ok(s.indexOf("xdg-terminal-exec") !== -1, "falls back to the default terminal")
+  // The presenter joins its arguments into a string a shell parses: it must be
+  // handed one already quoted, or a path with a space runs as two commands.
+  ok(s.indexOf("%q") !== -1, "the command handed to the presenter is quoted")
+})
+
+check("the tooltip says so when the daemon is not installed", () => {
+  ok(M.tooltipFor(M.notRunningState(), "off", "no").indexOf("not installed") !== -1)
+  // Installed or not yet known: the ordinary wording, so a slow check does not
+  // flash "not installed" at somebody who has it.
+  for (const i of ["yes", "unknown", undefined])
+    ok(M.tooltipFor(M.notRunningState(), "off", i).indexOf("not installed") === -1, String(i))
+})
+
+// ---- Choosing a background.
+
+const BACKDROPS = '{"effect":"replace","dim":0,"desat":0,"background":true,' +
+  '"backdrop":"beach","backdrops":["beach","home office","city"]}'
+
+check("the background row is offered under replace, and only there", () => {
+  const kinds = json => M.panelRows(M.parseStatus(json)).map(r => r.kind + ":" + (r.effect || r.key))
+  ok(kinds(BACKDROPS).indexOf("choice:backdrop") !== -1, kinds(BACKDROPS))
+  ok(kinds(BACKDROPS.replace('"effect":"replace"', '"effect":"blur"')).indexOf("choice:backdrop") === -1)
+  // One image is nothing to choose between.
+  ok(kinds(BACKDROPS.replace('["beach","home office","city"]', '["beach"]')).indexOf("choice:backdrop") === -1)
+  // A daemon older than backgrounds reports neither field and gets no row.
+  ok(kinds('{"effect":"replace","background":true}').indexOf("choice:backdrop") === -1)
+})
+
+check("a background is stepped through and sent by its whole name", () => {
+  const st = M.parseStatus(BACKDROPS)
+  eq(st.backdrop, "beach")
+  eq(M.stepChoice(st, "backdrop", 1), "home office")
+  eq(M.stepChoice(st, "backdrop", -1), "city")
+  eq(M.choiceCommand("backdrop", "home office"), [M.BINARY, "backdrop", "home office"])
+  eq(M.choiceFor("backdrop").label, "Background")
+})
+
+// ---- The replace-background hint.
+
+check("without an image the replace row is a hint, right after the effects", () => {
+  const rows = M.panelRows(M.parseStatus('{"effect":"blur","blur":12,"background":false}'))
+  const kinds = rows.map(r => r.kind + ":" + (r.effect || r.key))
+  eq(kinds.slice(0, 3), ["effect:none", "effect:blur", "hint:replace"])
+  // Not a real effect: choosing it must never be able to send `effect replace`.
+  ok(rows.filter(r => r.kind === "effect").every(r => r.effect !== "replace"), "no replace effect row")
+})
+
+check("with an image there is the real row and no hint", () => {
+  const rows = M.panelRows(M.parseStatus('{"effect":"blur","blur":12,"background":true}'))
+  const kinds = rows.map(r => r.kind + ":" + (r.effect || r.key))
+  ok(kinds.indexOf("effect:replace") !== -1, "replace offered: " + kinds)
+  ok(kinds.indexOf("hint:replace") === -1, "and not also hinted: " + kinds)
+})
+
+check("no hint before the daemon has answered", () => {
+  // A panel with nothing running has nothing to say about images yet.
+  eq(M.panelRows(M.notRunningState()).filter(r => r.kind === "hint").length, 0)
+  eq(M.panelRows(M.unknownState("could not read")).filter(r => r.kind === "hint").length, 0)
+})
+
+check("the hint says how to fix it, and names the file it means", () => {
+  const h = M.hintFor("replace")
+  ok(h && h.label === "Replace background", "labelled as the row it stands in for")
+  ok(h.detail.indexOf("BACKGROUND=") !== -1 && h.detail.indexOf("studio-effects.conf") !== -1, h.detail)
+  ok(h.detail.indexOf("~/.config/studio-effects/backgrounds") !== -1, h.detail)
+  eq(M.hintFor("nonsense"), null)
+})
+
+check("the cursor walks past hints and never lands on one", () => {
+  const rows = [{ kind: "effect" }, { kind: "effect" }, { kind: "hint" }, { kind: "toggle" }]
+  eq(M.isSelectable(rows[2]), false)
+  eq(M.isSelectable(rows[0]), true)
+  eq(M.isSelectable(null), false)
+  eq(M.nextSelectable(rows, 1, 1), 3, "down skips the hint")
+  eq(M.nextSelectable(rows, 3, -1), 1, "up skips it too")
+  eq(M.nextSelectable(rows, 3, 1), 0, "and wraps")
+  eq(M.nextSelectable(rows, 0, -1), 3, "backwards over the top")
+  // Nothing selectable at all: stay where you are rather than loop forever.
+  eq(M.nextSelectable([{ kind: "hint" }, { kind: "hint" }], 0, 1), 0)
+  eq(M.nextSelectable([], 0, 1), 0)
+})
+
+check("up and down treat the row of effects as one stop", () => {
+  const rows = [
+    { kind: "effect", effect: "none" }, { kind: "effect", effect: "blur" },
+    { kind: "effect", effect: "replace" }, { kind: "toggle", key: "framing" },
+    { kind: "param", key: "blur" }
+  ]
+  const st = { effect: "blur" }
+  eq(M.nextStop(rows, 0, 1, st), 3, "down from any effect leaves the row")
+  eq(M.nextStop(rows, 2, 1, st), 3)
+  eq(M.nextStop(rows, 3, -1, st), 1, "up into the row lands on the effect that is on")
+  eq(M.nextStop(rows, 4, 1, st), 1, "wrapping lands there too")
+  eq(M.nextStop(rows, 1, -1, st), 4, "up from the row wraps to the bottom")
+  eq(M.nextStop(rows, 3, 1, st), 4)
+})
+
+check("a hint beside the effects is still walked past", () => {
+  const rows = [
+    { kind: "effect", effect: "none" }, { kind: "effect", effect: "blur" },
+    { kind: "hint", key: "replace" }, { kind: "param", key: "blur" }
+  ]
+  eq(M.nextStop(rows, 1, 1, { effect: "blur" }), 3)
+  eq(M.nextStop(rows, 3, -1, { effect: "none" }), 0)
+  eq(M.nextStop([], 0, 1, {}), 0)
+  eq(M.nextStop([{ kind: "effect", effect: "none" }], 0, 1, { effect: "none" }), 0,
+     "a row that is all there is stays put")
+})
+
+check("left and right move along the effects and wrap", () => {
+  const rows = [
+    { kind: "effect", effect: "none" }, { kind: "effect", effect: "blur" },
+    { kind: "hint", key: "replace" }, { kind: "param", key: "blur" }
+  ]
+  eq(M.effectNeighbour(rows, 0, 1), 1)
+  eq(M.effectNeighbour(rows, 1, 1), 0, "wraps past the hint, which is not an effect")
+  eq(M.effectNeighbour(rows, 0, -1), 1)
+  eq(M.effectNeighbour(rows, 3, 1), 3, "off the row nothing moves")
+})
+
+check("a dragged slider lands on a value the arrow keys reach", () => {
+  eq(M.snapParam("blur", 50), 48, "blur steps by 6")
+  eq(M.snapParam("blur", 52), 54)
+  eq(M.snapParam("blur", -10), 0)
+  eq(M.snapParam("blur", 999), 200, "clamped to the maximum, as the arrow keys are")
+  eq(M.snapParam("dim", 44), 40)
+  eq(M.snapParam("zoom", 131), 140)
+  eq(M.snapParam("passes", 2.4), 2)
+  eq(M.snapParam("nonsense", 5), 0)
+})
+
+check("slider values carry their units", () => {
+  const st = { blur: 48, dim: 20, desat: 0, zoom: 200, passes: 2 }
+  eq(M.paramText(st, "blur"), "48 px")
+  eq(M.paramText(st, "dim"), "20%")
+  eq(M.paramText(st, "desat"), "0%")
+  eq(M.paramText(st, "zoom"), "2.0×")
+  eq(M.paramText(st, "passes"), "1", "smoothness shows extra passes, as before")
+})
+
+if (failures.length) {
+  console.error(failures.length + " failed, " + passed + " passed\n")
+  for (const f of failures) console.error("  " + f)
+  process.exit(1)
+}
+console.log(passed + " passed")

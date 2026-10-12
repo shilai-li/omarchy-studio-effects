@@ -1,0 +1,159 @@
+# Maintainer: Shilai Li <robotmaster1024@gmail.com>
+pkgname=omarchy-studio-effects
+pkgver=0.1.0
+pkgrel=4
+pkgdesc="NPU-accelerated camera background effects for Omarchy"
+arch=('x86_64')
+url="https://github.com/shilai-li/omarchy-studio-effects"
+# Three, because a built package is not only this repository. MIT covers the
+# daemon, the widget and the tools; the models keep their own terms and are
+# installed into /usr/share/studio-effects/models as build products of them:
+# Apache-2.0 for segmentation (MediaPipe, Google) and GPL-3.0 for matting
+# (RobustVideoMatting, fetched in source= below). Drop that source and the
+# matting build/install lines to omit GPL material; segmentation stays Apache-2.0.
+license=('MIT' 'Apache-2.0' 'GPL-3.0')
+
+# gst-plugins-good carries v4l2src and v4l2sink, jpegdec for a USB camera's
+# MJPEG and jpegenc for the preview, aspectratiocrop and pngenc; -base, through
+# -base-libs, carries decodebin, videoconvert, videoscale and appsrc/appsink.
+# Nothing comes from -bad, whatever this once said about the jpeg decoding.
+depends=('openvino' 'gstreamer' 'gst-plugins-base' 'gst-plugins-good'
+         'v4l2loopback-dkms' 'v4l2loopback-utils'
+         # Voice Focus: the RNNoise LADSPA plugin, run inside a PipeWire
+         # filter-chain. A hard dependency because the unit ships enabled-able
+         # and a filter-chain pointing at a missing plugin fails at load with
+         # nothing useful in the journal.
+         # wireplumber for wpctl, and pipewire's own pw-metadata/pw-link, which
+         # the voice-default helper uses to move the default microphone.
+         'pipewire' 'wireplumber' 'noise-suppression-for-voice')
+makedepends=('cargo' 'python-openvino')
+
+# Creates the Studio Camera device when the package is installed and removes it
+# when the package is. See the file for why that is not left to the reader.
+install=omarchy-studio-effects.install
+
+# The NPU is the point, but the daemon falls back to GPU and then CPU, so none
+# of these is required to have a working camera.
+optdepends=('intel-npu-driver: segmentation on the NPU'
+            'openvino-intel-npu-plugin: segmentation on the NPU'
+            'openvino-intel-gpu-plugin: segmentation on the GPU')
+
+# Built from the checkout this file sits in, not from a release: there is no
+# published tarball yet. `git archive HEAD` rather than a copy, so a package is
+# always built from committed state -- otherwise an experiment left in the tree
+# ends up installed in /usr/bin with a version number that says otherwise.
+#
+# To publish: replace this with
+#   source=("$pkgname-$pkgver.tar.gz::$url/archive/v$pkgver.tar.gz")
+# and drop the prepare() export, keeping the cargo fetch.
+# Keep source materials alongside the converted GPL model in the package, so
+# recipients can modify it without relying on an upstream download staying up.
+# The release source includes training/model code; the separate ONNX branch
+# contains the exporter and its model adaptations. Pin both to immutable commits.
+source=("rvm_mobilenetv3.onnx::https://github.com/PeterL1n/RobustVideoMatting/releases/download/v1.0.0/rvm_mobilenetv3_fp32.onnx"
+        "rvm_mobilenetv3.pth::https://github.com/PeterL1n/RobustVideoMatting/releases/download/v1.0.0/rvm_mobilenetv3.pth"
+        "rvm-source.tar.gz::https://github.com/PeterL1n/RobustVideoMatting/archive/17d1774b032fd503bfe53c57d295db719f9e3da1.tar.gz"
+        "rvm-onnx-source.tar.gz::https://github.com/PeterL1n/RobustVideoMatting/archive/ebead27cb683e157b2bea7ca869daa820a07ba8f.tar.gz")
+noextract=('rvm_mobilenetv3.onnx' 'rvm_mobilenetv3.pth'
+           'rvm-source.tar.gz' 'rvm-onnx-source.tar.gz')
+sha256sums=('88d4531297118f595bf2fd60f6f566aec2e559393802d1f436c380f0cbbd2828'
+            '3c7c1d92033f7c38d6577c481d13a195d7d80a159b960f4f3119ac7b534cf4f8'
+            'cb39aed8388bbde802a77a86aa5a8b9af4607538064ec904e077f439affc881a'
+            'ddfb4e85872342a8a32ed4703b5d0bc2ab2a23b9db885384b0e625e1f9c79062')
+
+_repo="$pkgname-$pkgver"
+
+prepare() {
+  rm -rf "$srcdir/$_repo"
+  mkdir -p "$srcdir/$_repo"
+  git -C "$startdir/.." archive --format=tar HEAD | tar -x -C "$srcdir/$_repo"
+
+  cd "$srcdir/$_repo/daemon"
+  cargo fetch --locked
+}
+
+build() {
+  cd "$srcdir/$_repo"
+  # The IR is generated, not committed: it is a build product of the .onnx and
+  # of whichever OpenVINO version is installed here.
+  # Both models, named for what they are rather than for their papers.
+  /usr/bin/python3 tools/convert.py models/selfie_segmentation.onnx \
+                                    models/segmentation.xml
+  /usr/bin/python3 tools/convert.py "$srcdir/rvm_mobilenetv3.onnx" \
+                                    models/matting.xml
+  /usr/bin/python3 - <<'PY' > models/build-info.txt
+from datetime import datetime, timezone
+import numpy
+import openvino
+print("Models converted by Omarchy Studio Effects at", datetime.now(timezone.utc).isoformat())
+print("OpenVINO:", openvino.__version__)
+print("NumPy:", numpy.__version__)
+print("Transformations and source revisions: see MODEL-SOURCES.md")
+PY
+  cd daemon
+  cargo build --release --frozen
+}
+
+check() {
+  cd "$srcdir/$_repo/daemon"
+  # Covers the two hot loops against slow reference implementations. Needs no
+  # camera, no NPU and no loopback, so it runs in a clean build container.
+  cargo test --release --frozen
+}
+
+package() {
+  cd "$srcdir/$_repo"
+
+  # OpenVINO changes its library soname even on patch releases. A prebuilt
+  # daemon must depend on the version it was linked against; source builds
+  # still accept whichever version is installed when makepkg starts.
+  local openvino_package
+  openvino_package=$(pacman -Q openvino)
+  openvino_package=${openvino_package#* }
+  depends[0]="openvino=${openvino_package%-*}"
+
+  install -Dm755 daemon/target/release/studio-effects-daemon \
+                 "$pkgdir/usr/bin/studio-effects-daemon"
+  install -Dm755 daemon/target/release/studio-effects \
+                 "$pkgdir/usr/bin/studio-effects"
+
+  for name in segmentation matting; do
+    install -Dm644 "models/$name.xml" \
+                   "$pkgdir/usr/share/studio-effects/models/$name.xml"
+    install -Dm644 "models/$name.bin" \
+                   "$pkgdir/usr/share/studio-effects/models/$name.bin"
+  done
+
+  install -Dm644 packaging/studio-effects-loopback.service \
+                 "$pkgdir/usr/lib/systemd/system/studio-effects-loopback.service"
+  install -Dm644 packaging/studio-effects.service \
+                 "$pkgdir/usr/lib/systemd/user/studio-effects.service"
+  install -Dm644 packaging/studio-effects-voice.service \
+                 "$pkgdir/usr/lib/systemd/user/studio-effects-voice.service"
+  install -Dm644 packaging/voice-focus.conf \
+                 "$pkgdir/usr/share/studio-effects/voice-focus.conf"
+  install -Dm755 packaging/studio-effects-voice-default \
+                 "$pkgdir/usr/lib/studio-effects/voice-default"
+  install -Dm755 packaging/studio-effects-loopback-prepare \
+                 "$pkgdir/usr/lib/studio-effects/loopback-prepare"
+
+  install -Dm644 packaging/studio-effects.conf.example \
+                 "$pkgdir/usr/share/studio-effects/studio-effects.conf.example"
+
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  for file in LICENSE-Apache-2.0.txt LICENSE-RVM-GPL-3.0.txt MODEL-SOURCES.md; do
+    install -Dm644 "models/$file" "$pkgdir/usr/share/licenses/$pkgname/$file"
+  done
+  install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+  install -Dm644 models/MODEL-SOURCES.md \
+                 "$pkgdir/usr/share/doc/$pkgname/model-source/MODEL-SOURCES.md"
+  install -Dm644 models/build-info.txt \
+                 "$pkgdir/usr/share/doc/$pkgname/model-source/build-info.txt"
+  install -Dm644 tools/convert.py \
+                 "$pkgdir/usr/share/doc/$pkgname/model-source/convert.py"
+  install -Dm644 packaging/PKGBUILD \
+                 "$pkgdir/usr/share/doc/$pkgname/model-source/PKGBUILD"
+  for file in rvm_mobilenetv3.onnx rvm_mobilenetv3.pth rvm-source.tar.gz rvm-onnx-source.tar.gz; do
+    install -Dm644 "$srcdir/$file" "$pkgdir/usr/share/doc/$pkgname/model-source/$file"
+  done
+}

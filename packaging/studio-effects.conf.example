@@ -1,0 +1,120 @@
+# Copy to ~/.config/studio-effects.conf and edit, then:
+#   systemctl --user restart studio-effects
+#
+# This file is where the daemon starts from. Anything you then change from the
+# bar panel -- the effect, blur, framing, zoom -- is remembered in
+#   ~/.local/state/studio-effects/settings.json
+# and wins over the values here, so switching the camera off and on keeps what
+# you last chose rather than undoing it. Delete that file to go back to these.
+#
+# INPUT takes either a /dev/video path or a card label. Prefer the label:
+# numbers move between boots. `studio-effects-daemon --list-devices` prints both.
+INPUT=/dev/video0
+
+# What applications receive, and how fast. Zero, the default, picks for the
+# machine and then asks the camera what it has:
+#
+#   NPU or GPU   the biggest mode up to 1920x1080, at up to 60 fps
+#   CPU alone    the biggest mode up to 1280x720, at up to 30 fps -- what a
+#                laptop without an NPU can carry with the camera on all day
+#
+# A camera with no mode that large gets its own best and is not stretched to fit;
+# one with no 60 fps runs at 30. Set WIDTH and HEIGHT to ask for something else
+# (1920 and 1080 on a CPU-only machine that can afford it), and FPS as the
+# ceiling on the rate. The daemon says what it got, once, in the journal:
+#     camera delivers image/jpeg 1280x720 at 30/1 fps
+WIDTH=0
+HEIGHT=0
+FPS=0
+
+# Ask the camera to keep its frame rate. Many webcams stretch their exposure in
+# dim light and quietly drop to 8-10 fps, which reaches a call as a slideshow;
+# holding the rate trades that for a darker, noisier picture. It lasts until the
+# camera is replugged, so it outlives the daemon, and a camera without the
+# control ignores it. Set to off to leave the camera alone.
+HOLD_FRAMERATE=on
+
+# What to capture from the camera, if larger than the output. Worth setting
+# with auto framing: the crop is taken from the captured frame and scaled to
+# the output, so capturing 1920x1080 for a 1280x720 output means zooming to
+# 150% costs no sharpness at all. Zero follows the output.
+#
+# It costs about 3 ms of CPU a frame with a USB camera -- one to scale the
+# picture, two more to decode a bigger one -- because the expensive stages
+# still run at the output size. Without framing there is nothing to gain, so
+# leave it at zero.
+CAPTURE_WIDTH=0
+CAPTURE_HEIGHT=0
+
+# Which model finds you in the frame.
+#
+#   segmentation  MediaPipe selfie segmentation. 0.8 ms, a hard-edged mask.
+#   matting       RobustVideoMatting. 3.4 ms, a true alpha matte with recurrent
+#                 state, so hair looks like hair and edges hold still between
+#                 frames instead of shimmering.
+#
+# Both run on the NPU. Matting costs about 4 ms more of a 33 ms frame, which is
+# what the NPU's spare capacity is for. Switchable while running from the bar
+# panel's "Model" row, or `studio-effects model matting`: the swap takes about
+# 15 ms from the compile cache, which is what makes comparing them on the same
+# face in the same light possible at all. This sets which one starts.
+MODEL=matting
+
+# Background blur radius, in pixels at the frame's own scale. Adjustable while
+# running from the bar panel, or `studio-effects blur 40`.
+BLUR=20
+
+# Repeats of the blur, 1 to 3. One is the cheapest and the default; it can show
+# streaking against hard edges. Two is close enough to a Gaussian, at twice the
+# blur cost. The panel's "Smoothness" counts extra passes: 0 is one pass,
+# 1 is two passes, and 2 is three passes.
+PASSES=1
+
+# Darken the background, 0 to 100. Makes you stand out without touching you.
+DIM=0
+
+# Drain colour from the background, 0 to 100.
+DESAT=0
+
+# Make Voice Focus the default microphone while it is running, and put the
+# previous one back when it stops. Set to no if you would rather pick it per
+# application; applications that only follow "default" will then never use it.
+VOICE_SET_DEFAULT=yes
+
+# How far auto framing may crop in, as a percentage: 200 is 2x. Raise it if you
+# sit well back from the camera and the framing still feels distant; the crop is
+# scaled back up to the output size, so far past this the picture goes soft.
+# Adjustable live from the panel while framing is on.
+FRAMING_ZOOM=200
+
+# Track you and keep you centred. Costs about 11 ms a frame at 1080p, which is
+# the most expensive thing here, so it is off unless asked for.
+FRAMING=off
+
+# The starting effect. To change it while the daemon runs -- which is what you
+# want on a call, since a restart drops the camera for a second -- use the
+# `studio-effects` command instead of editing this.
+#
+# none, blur, or replace. `none` still runs the daemon and keeps the output
+# device alive, so apps do not lose their camera selection when you turn
+# effects off.
+EFFECT=blur
+
+# Images for "Replace background". Every JPG and PNG in BACKGROUND_DIR is a
+# choice in the panel's Background row, named after its file; BACKGROUND adds
+# one image from anywhere and is offered first. Empty BACKGROUND_DIR means
+#   ~/.config/studio-effects/backgrounds
+# The folder is read again whenever the panel asks, so images dropped into it
+# appear without a restart. Each is cropped to your camera's aspect and scaled
+# to fill, so a wallpaper does not arrive letterboxed.
+BACKGROUND=
+BACKGROUND_DIR=
+
+# How hard to push the model's output toward solid foreground or background.
+# 1 uses it raw, which makes a moving hand look transparent rather than moving.
+# Higher is more decisive; too high turns hair into a cut-out.
+MASK_GAIN=3.0
+
+# How much of the previous frame's mask to keep, 0 to 0.95. Steadies the edge
+# while you sit still; too much smears the silhouette behind you when you move.
+MASK_SMOOTHING=0.5

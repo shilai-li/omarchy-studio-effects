@@ -1,0 +1,36 @@
+# Voice Focus: a denoised copy of the microphone, published as its own source.
+#
+# Separate from studio-effects.service, and deliberately so. Voice and camera
+# are independent -- denoising a call you are on with the camera off is a normal
+# thing to want -- and they fail independently too, so a camera that cannot
+# start should not take the microphone filter down with it.
+#
+# Not enabled by default. While this runs the filter exists in every
+# application's microphone list, which is only useful if you want it there.
+
+[Unit]
+Description=Studio Effects voice focus
+Documentation=https://github.com/shilai-li/omarchy-studio-effects
+After=pipewire.service
+BindsTo=pipewire.service
+
+[Service]
+Type=simple
+Environment=VOICE_SET_DEFAULT=yes
+EnvironmentFile=-%h/.config/studio-effects.conf
+ExecStart=/usr/bin/pipewire -c /usr/share/studio-effects/voice-focus.conf
+
+# Take over the default microphone while the filter runs, and hand it back on
+# the way out. Applications that follow "default" -- most of them, and the only
+# option in some -- cannot use the filter otherwise. Handing it back matters
+# more: the voice_focus node exists only while this service does, so a default
+# left pointing at it after a stop points every one of those applications at a
+# device that is gone.
+ExecStartPost=/usr/lib/studio-effects/voice-default claim
+ExecStopPost=/usr/lib/studio-effects/voice-default release
+Restart=on-failure
+RestartSec=2
+Slice=session.slice
+
+[Install]
+WantedBy=default.target

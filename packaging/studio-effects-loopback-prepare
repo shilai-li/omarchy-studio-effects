@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+#
+# Loads the v4l2loopback module for Studio Camera, without leaving its default
+# device behind.
+#
+#   studio-effects-loopback-prepare                load the module if nobody has,
+#                                                  and drop the device it makes
+#   studio-effects-loopback-prepare --remove-stray drop that device if it is there
+#
+# Loading the module with no arguments creates one device of its own, a
+# "Dummy video device (0x0000)", before Studio Camera is added beside it. On a
+# machine where nothing else configures the module that is a second, useless
+# camera in every application's list, between the real one and the one this
+# package makes.
+#
+# The obvious fix is to load with devices=0, and it is wrong. Omarchy's own
+# camera setup loads this same module with options of its own to make its relay
+# device, and whichever unit loads it first decides: a devices=0 here could win
+# that race and leave the built-in camera with no device at all. So this changes
+# nothing about how the module loads. It acts only when it is the one that loaded
+# it, removes only the one device the module makes by default, and only if
+# nothing has it open. Everything else is somebody else's and is left alone.
+#
+# The paths can be pointed elsewhere (LOOPBACK_SYS, LOOPBACK_MODULES) so the
+# whole thing can be tested against a made-up /sys without a kernel module.
+
+set -u
+
+sys="${LOOPBACK_SYS:-/sys/class/video4linux}"
+modules="${LOOPBACK_MODULES:-/proc/modules}"
+stray="Dummy video device (0x0000)"
+
+remove_stray() {
+    local name dev
+    for name in "$sys"/*/name; do
+        [ -r "$name" ] || continue
+        [ "$(cat "$name")" = "$stray" ] || continue
+        dev="/dev/$(basename "$(dirname "$name")")"
+        # In use means somebody wants it. Not ours to take away.
+        if command -v fuser >/dev/null 2>&1 && fuser "$dev" >/dev/null 2>&1; then
+            continue
+        fi
+        v4l2loopback-ctl delete "$dev" || true
+    done
+}
+
+case "${1:-}" in
+    --remove-stray)
+        remove_stray
+        ;;
+    "")
+        if ! grep -q '^v4l2loopback ' "$modules" 2>/dev/null; then
+            modprobe v4l2loopback || exit 1
+            remove_stray
+        fi
+        ;;
+    *)
+        echo "usage: ${0##*/} [--remove-stray]" >&2
+        exit 2
+        ;;
+esac
+exit 0

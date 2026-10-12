@@ -1,0 +1,30 @@
+# The IR pair is generated from the committed .onnx by tools/convert.py, so it
+# is built, not source. Everything else here is source — this file exists so a
+# stray editor swap never lands in a plugin someone else installs.
+target/
+
+# makepkg's workspace and output, all rebuildable from the checkout.
+/packaging/pkg/
+/packaging/src/
+*.pkg.tar.zst
+
+# makepkg caches model weights and source archives beside the PKGBUILD. Kept
+# across rebuilds, but never committed.
+/packaging/*.onnx
+/packaging/*.pth
+/packaging/rvm*-source.tar.gz
+/models/*.xml
+/models/*.bin
+
+# MediaPipe's own .tflite is a dead end, not an original: it carries a custom op
+# OpenVINO's tflite frontend cannot translate. See AGENTS.md.
+/models/*.tflite
+
+# RobustVideoMatting's ONNX. Fetched by the PKGBUILD rather than committed: it
+# is 15 MB, and the IR built from it is another 8.
+/models/*.onnx.tmp
+/models/rvm.onnx
+
+*~
+.*.sw?
+node_modules/
