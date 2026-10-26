@@ -22,7 +22,7 @@
 //! `gst-launch-1.0 v4l2src num-buffers=30 ! ... ! filesink` -- take the last.
 
 use std::time::{Duration, Instant};
-use studio_effects_daemon::nv12::{write_model_input, NET};
+use studio_effects_daemon::nv12::write_model_input;
 use studio_effects_daemon::segmenter::Segmenter;
 
 /// utime + stime for this whole process, in seconds. USER_HZ is 100.
@@ -74,17 +74,18 @@ fn main() {
             let mut ms = Vec::new();
             let mut last = Vec::new();
             for _ in 0..12 {
+                let net = seg.size;
                 let input = seg.input_buffer().expect("input tensor");
                 if let Some((frame, w, h)) = &real {
                     let (y, uv) = frame.split_at(w * h);
-                    write_model_input(y, uv, *w, *h, *w, *w, input);
+                    write_model_input(y, uv, *w, *h, *w, *w, net, input);
                 } else {
                     for c in 0..3 {
-                    for y in 0..NET {
-                        for x in 0..NET {
-                            let (fx, fy) = (x as f32 / NET as f32, y as f32 / NET as f32);
+                    for y in 0..net.h {
+                        for x in 0..net.w {
+                            let (fx, fy) = (x as f32 / net.w as f32, y as f32 / net.h as f32);
                             let blob = (1.0 - (((fx - 0.5) / 0.3).powi(2) + ((fy - 0.55) / 0.4).powi(2))).clamp(0.0, 1.0);
-                            input[c * NET * NET + y * NET + x] =
+                            input[c * net.len() + y * net.w + x] =
                                 0.15 + 0.3 * fx + 0.1 * c as f32 * fy + 0.45 * blob;
                         }
                     }

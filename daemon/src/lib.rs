@@ -4,6 +4,7 @@ pub mod background;
 pub mod camera;
 pub mod control;
 pub mod device;
+pub mod fill;
 pub mod framing;
 pub mod mask;
 pub mod nv12;

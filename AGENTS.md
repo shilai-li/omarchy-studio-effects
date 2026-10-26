@@ -52,6 +52,7 @@ tools/cycles.py          the daemon's cycles per frame, which the clock cannot s
 daemon/src/main.rs       CLI, GStreamer wiring, per-stage timing
 daemon/src/nv12.rs       the frame maths, and the tests that pin it
 daemon/src/mask.rs       conditioning the model's output into an alpha
+daemon/src/fill.rs       keeping the subject out of their own background blur
 daemon/src/background.rs decoding a replacement background once
 daemon/src/preview.rs    the JPEG the bar widget shows
 daemon/src/segmenter.rs  device choice, model cache, one inference per frame
@@ -412,11 +413,121 @@ display is offset; stepping and clamping use the daemon's range, so an old
 saved setting keeps the same image after a widget update.
 
 **Two models, and the NPU's spare capacity is what pays for the second.**
-`segmentation` is MediaPipe selfie segmentation at 0.8 ms; `matting` is
-RobustVideoMatting at 3.4 ms, a true alpha matte with recurrent state, so hair
-reads as hair and edges hold still instead of shimmering. Both output
-`[1,1,256,256]`, which is why the second is a drop-in: the upscaler, the subject
-box and the blend are untouched.
+`segmentation` is MediaPipe selfie segmentation at 256x256; `matting` is
+RobustVideoMatting at 512x288, a true alpha matte with recurrent state, so hair
+reads as hair and edges hold still instead of shimmering. The grids differ, so
+nothing downstream may assume one: the segmenter reads every shape from the IR
+and reports it as `Segmenter::size`, and the upscaler, the mask filter, the
+subject box and the framing are sized from that -- and rebuilt when the model
+is switched.
+
+**Matting runs at 512x288 because 256x256 lost hands.** It used to share
+segmentation's 256x256, which squashed a 16:9 frame into a square, and its
+`downsample_ratio` of 0.5 left the encoder 128x128: a finger was two or three
+pixels wide, and a waving hand came out as a blob that was blurred half the
+time. At 512x288 (encoder 256x144, refiner back to 512x288) the fingers come
+out one by one. Compared offline, both IRs fed the same recorded clip of a
+waving hand; box-averaging the input instead of nearest sampling changed
+nothing visible, so the cheap sampling stayed.
+
+`tools/bench.py`, back to back on this NPU: 7.1 ms at 256x256, 15.1 at 512x288,
+22.2 at 640x352, 55.8 at 512x288 with no downsampling. At a real 30 fps cadence
+the NPU's per-inference overhead is most of the latency: 12.3-17.7 ms for the
+512x288 IR across rounds, with the same rounds swinging 5 ms on their own. A
+live comparison once reported both sizes at 12.3 ms in the daemon; it was void,
+because both runs loaded the installed 256x256 model -- see "A model path loads
+that file" below. `tools/load.py` puts the model alone at 0.75 ms of CPU a frame on the
+NPU and 3.2 on the GPU. **The CPU fallback is the casualty**: 111 ms a frame on
+one thread here, 18.6 with all of them, so a machine without an NPU or a GPU
+plugin cannot hold 30 fps on matting and should use `MODEL=segmentation`.
+
+**The blur is of the background only, or the subject glows into it.**
+Blurring the whole frame and pasting the sharp subject back smears the subject
+into the blur around them: a skin-coloured glow round a hand, a dark one round
+hair, as wide as the radius. That halo, not the model, was the visible gap to a
+commercial call's blur. `fill.rs` replaces the subject with an estimate of the
+background behind them (block averages of the background, blurred and
+normalised in floats) on each plane **after the blur has shrunk it and before
+it is blurred**, through a hook in `nv12::Blur::apply_filled`. Three things are
+not the obvious way round:
+
+- **Not a normalised blur.** Dividing a blur of the weighted frame by a blur of
+  the weights is the textbook version, and in the u8 blur that division
+  amplifies rounding wherever background is scarce -- a gap between fingers
+  posterises. The fill's division happens on the coarse estimate in floats,
+  and only stands in for pixels the subject covers.
+- **On the shrunken plane.** Done at full size it cost 3.2 ms a frame at 1080p.
+  On the plane the blur actually works at it is 0.61 ms at radius 72 (1/4
+  size) and 1.49 ms at radius 20 (1/2 size), `frame_cost`, P-core. Below radius
+  10 the blur runs at full size and there is no fill: the glow is then
+  narrower than the mask's own soft edge.
+- **Weights are `(1 - alpha)^2`.** Linear weights let the soft band at the
+  silhouette -- most of a motion-blurred hand's edge -- into the estimate, and
+  bring back a faint glow.
+
+Live at 1080p30 with blur 72 x3, the blur stage went from 1.4 to 2.3 ms and the
+process from 14.4 to 15.3 ms of CPU a frame, still at 30.1 fps. Those runs
+loaded the installed 256x256 matting model by mistake (see below); the fill's
+cost does not depend on the model, the inference figures in them do.
+`blurring_with_the_fill_leaves_no_glow` holds a pixel beside a bright subject
+to within 3 levels of the background, where the plain blur leaves it 40+ brighter.
+
+**Inference latency has a floor of about 12 ms on this NPU.** None of
+`PERFORMANCE_HINT=LATENCY`, `NPU_TURBO`, `MODEL_PRIORITY` or an f16 precision
+hint moved it reliably at a 30 fps cadence -- runs alternated between about 13
+and 20-24 ms whatever was set, which looks like the NPU's own power states.
+Dropping RVM's unused `fgr` output (`tools/convert.py`) saved at most half a
+millisecond, inside that noise. The GPU does the same model in about 4 ms at
+3.2 ms of CPU a frame against the NPU's 0.75: that is the trade if latency ever
+matters more than the CPU, and it is a device choice, not a quality one.
+
+**A model path loads that file.** `--model` takes a bare name or a path, and
+the daemon used to reduce a path to its bare name -- which `resolve_model` then
+looked up among the *installed* models first. Pointing the service at a
+checkout's `models/matting.xml` therefore ran the packaged `matting.xml`, an
+older 256x256 one, with nothing logged to say so; a day of live comparisons
+measured the installed model against itself. A path now loads exactly that
+file and wins over a remembered model. Check `studio-effects status`: `model`
+is the full path when one was given.
+
+**A recurrent model gets smoothing that adapts to motion.** `MASK_SMOOTHING`
+blends each mask with the last, which steadies segmentation's edges. On RVM it
+trailed four or five stepped copies of a waving hand's edge behind it -- the
+hand's current position half covered and the room beside it half sharp. Taking
+it away entirely was the first fix and it was wrong the other way: still edges
+shimmered, reported as "the edge is moving". On the recorded clip a still
+head's outline moved 0.028 a frame (p95 0.21) with none, against 0.024 (p95
+0.14) for the old 256x256 build with the plain blend. RVM's own memory is not
+enough. `MaskFilter::motion_adaptive` keeps up to 0.95 of the last frame,
+scaled down by how much each pixel changed and gone at a change of 0.7: jitter
+is a small change, a hand a large one.
+
+**And it smooths before the curve, not after.** Smoothing the steepened mask
+left faint outlines of a moving hand behind it -- an edge pixel fading from 0.3
+to 0 is a small change, so it was held, an echo of every edge the hand had
+crossed, and it read as the edge moving. Smoothing the raw probability and
+steepening afterwards sends those values to 0. On the clip, MobileNetV3:
+
+| | still-edge jitter (p95) | faint echoes left of the head |
+|---|---|---|
+| no smoothing | 0.028 (0.21) | 0.4% of pixels |
+| smoothed after the curve | 0.019 (0.074) | 1.8% |
+| **smoothed before the curve** | **0.015** (0.078) | **0.3%** |
+
+and the moving hand lags 0.003 where the plain 0.5 blend lagged 0.035. The
+measuring script fed every variant the same raw model output; jitter is mean
+absolute frame-to-frame change on the silhouette band, right half of the frame.
+`motion_adaptive_leaves_no_echo_of_a_passing_edge` fails the other way round.
+
+**RVM ResNet-50 was tried and not taken.** Same release, 7x the parameters
+(53.7 MB as FP16 IR against 7.5). On this NPU at a 30 fps cadence it cost the
+same as MobileNetV3 -- 13-19 ms against 12-18 across rounds, 0.9 ms of CPU a
+frame either way -- so speed was not the reason. On the clip its still edges
+were a little steadier (jitter 0.013 against 0.015), but its moving hand came
+out softer, and both missed a hand passing in front of the shirt even in their
+raw output. Not worth a seven-fold download. Windows Studio Effects, the
+comparison people make, also runs on the NPU, not the GPU; per Microsoft it is
+a proprietary model that can segment from a higher resolution than it outputs.
 
 The model is switched live, not only at startup: the frame loop compares the
 requested name against the loaded one each pass and reloads on a change, keeping

@@ -316,14 +316,14 @@ bindd = SUPER CTRL, B, Toggle camera effects, exec, studio-effects toggle
 ## Two models
 
 ```conf
-MODEL=matting        # default: RobustVideoMatting, 3.4 ms, a true alpha matte
-MODEL=segmentation   # alternative: MediaPipe, 0.8 ms, a hard-edged mask
+MODEL=matting        # default: RobustVideoMatting at 512x288, a true alpha matte
+MODEL=segmentation   # alternative: MediaPipe at 256x256, a hard-edged mask
 ```
 
-Both run on the NPU. Matting gives soft, natural hair edges and holds them still
-between frames, because it carries state from one frame to the next rather than
-deciding each one afresh. It costs about 4 ms more of a 33 ms budget — which is
-what the NPU's spare capacity is for, since it otherwise sits under 1% busy.
+Both run on the NPU. Matting gives soft, natural hair edges and separate
+fingers, and holds them still between frames, because it carries state from one
+frame to the next rather than deciding each one afresh. On a machine with no NPU
+and no GPU, use segmentation: matting is too heavy for the CPU to hold 30 fps.
 
 The config line only sets which one starts. Switch between them while the camera
 is running, from the panel's **Model** row or with:

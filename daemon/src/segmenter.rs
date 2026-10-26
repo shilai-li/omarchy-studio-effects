@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
-use crate::nv12::NET;
+use crate::nv12::MaskSize;
 
 /// Devices in the order we want them, best first.
 const PREFERENCE: [&str; 3] = ["NPU", "GPU", "CPU"];
@@ -31,6 +31,10 @@ pub struct Segmenter {
     mask_output: String,
     states: Vec<Recurrent>,
     mask: Vec<f32>,
+    /// The model's input grid, and so the mask's.
+    pub size: MaskSize,
+    /// Whether the model carries memory from frame to frame.
+    pub recurrent: bool,
     pub device: String,
     pub model: String,
     /// How many threads the CPU plugin was held to. `None` on any other device,
@@ -145,15 +149,19 @@ impl Segmenter {
             .with_context(|| format!("reading model {model_xml}"))?;
 
         // A matting model announces itself by its inputs: an image plus four
-        // recurrent states, rather than an image alone.
-        let inputs: Vec<String> = (0..model.get_inputs_len()?)
-            .filter_map(|i| model.get_input_by_index(i).ok())
-            .filter_map(|n| n.get_name().ok())
-            .collect();
-        let recurrent = inputs.iter().any(|n| n == "r1i");
+        // recurrent states, rather than an image alone. Every shape comes from
+        // the file, which `tools/convert.py` made static, so a model converted
+        // at another size needs nothing changed here.
+        let mut inputs = Vec::new();
+        for i in 0..model.get_inputs_len()? {
+            let node = model.get_input_by_index(i)?;
+            let shape = node.get_shape().with_context(|| format!("input {i} of {model_xml} has no static shape"))?;
+            inputs.push((node.get_name()?, shape.get_dimensions().to_vec()));
+        }
+        let recurrent = inputs.iter().any(|(n, _)| n == "r1i");
         let spec = Spec { recurrent, inputs, device };
 
-        // The CPU plugin left alone spreads one 256x256 inference across every
+        // The CPU plugin left alone spreads one inference across every
         // thread and spins them between frames. Measured on an i5-8250U
         // holding 30 fps, segmentation cost 10.7 ms of CPU a frame that way and
         // 4.2 on one thread, with latency still a fifth of the frame; matting
@@ -209,8 +217,15 @@ impl Segmenter {
 
         // Allocated once and refilled per frame; the model's shape is static
         // precisely so this never has to be rebuilt.
-        let input = Tensor::new(ElementType::F32, &Shape::new(&[1, 3, NET as i64, NET as i64])?)?;
-        let image_input = if recurrent { "src" } else { inputs.first().map_or("", |s| s.as_str()) };
+        let (image_input, image_shape) = inputs
+            .iter()
+            .find(|(n, _)| !recurrent || n == "src")
+            .context("the model has no image input")?;
+        let size = match image_shape[..] {
+            [1, 3, h, w] if h > 1 && w > 1 => MaskSize { w: w as usize, h: h as usize },
+            _ => anyhow::bail!("expected an image input of [1, 3, H, W], got {image_shape:?}"),
+        };
+        let input = Tensor::new(ElementType::F32, &Shape::new(image_shape)?)?;
         request.set_tensor(image_input, &input)?;
 
         // The states start at zero, which is what "no previous frame" means to
@@ -224,16 +239,14 @@ impl Segmenter {
         // every frame blurred, subject included -- with nothing logged.
         let mut states = Vec::new();
         if recurrent {
-            for (name, shape) in [
-                ("r1", [1, 16, 64, 64]),
-                ("r2", [1, 20, 32, 32]),
-                ("r3", [1, 40, 16, 16]),
-                ("r4", [1, 64, 8, 8]),
-            ] {
-                let dims: Vec<i64> = shape.iter().map(|&d| d as i64).collect();
-                let mut tensor = Tensor::new(ElementType::F32, &Shape::new(&dims)?)?;
-                tensor.get_data_mut::<f32>()?.fill(0.0);
+            for name in ["r1", "r2", "r3", "r4"] {
                 let input = format!("{name}i");
+                let (_, dims) = inputs
+                    .iter()
+                    .find(|(n, _)| *n == input)
+                    .with_context(|| format!("the matting model has no {input} input"))?;
+                let mut tensor = Tensor::new(ElementType::F32, &Shape::new(dims)?)?;
+                tensor.get_data_mut::<f32>()?.fill(0.0);
                 request.set_tensor(&input, &tensor)?;
                 states.push(Recurrent {
                     input,
@@ -248,7 +261,9 @@ impl Segmenter {
             input,
             mask_output: if recurrent { "pha".into() } else { String::new() },
             states,
-            mask: vec![0.0; NET * NET],
+            mask: vec![0.0; size.len()],
+            size,
+            recurrent,
             device,
             model: if recurrent { "matting".into() } else { "segmentation".into() },
             threads,
@@ -289,7 +304,7 @@ impl Segmenter {
         Ok(self.input.get_data_mut::<f32>()?)
     }
 
-    /// Run one inference and hand back the 256x256 foreground mask.
+    /// Run one inference and hand back the foreground mask, `size` in shape.
     ///
     /// The result is copied out rather than borrowed from the request: the
     /// output tensor is owned by the request, and handing out a slice into it
@@ -304,7 +319,15 @@ impl Segmenter {
         } else {
             self.request.get_tensor(&self.mask_output)?
         };
-        self.mask.copy_from_slice(out.get_data::<f32>()?);
+        let values = out.get_data::<f32>()?;
+        anyhow::ensure!(
+            values.len() == self.mask.len(),
+            "the model returned {} mask values for a {}x{} input",
+            values.len(),
+            self.size.w,
+            self.size.h
+        );
+        self.mask.copy_from_slice(values);
 
         // Carry the model's memory into the next frame. Copied rather than
         // swapped because the request holds these tensors: handing it a
@@ -322,7 +345,8 @@ impl Segmenter {
 /// What a model needs to be built on a device, gathered once.
 struct Spec {
     recurrent: bool,
-    inputs: Vec<String>,
+    /// Each input's name and static shape.
+    inputs: Vec<(String, Vec<i64>)>,
     device: String,
 }
 

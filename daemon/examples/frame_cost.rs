@@ -11,7 +11,7 @@
 //! the frame rate and the clock move under it -- see AGENTS.md.
 
 use std::time::Instant;
-use studio_effects_daemon::nv12::{self, MaskUpscaler, Resampler, NET};
+use studio_effects_daemon::nv12::{self, MaskSize, MaskUpscaler, Resampler, NET};
 
 /// Median of 200 runs, in milliseconds.
 fn time(mut f: impl FnMut()) -> f64 {
@@ -75,7 +75,7 @@ fn main() {
     let (mut y, mut uv) = (vec![0u8; w * h], vec![0u8; w * h / 2]);
     let mut scratch = vec![0u8; w * h];
 
-    let prep = time(|| nv12::write_model_input(&cy, &cuv, cw, ch, cw, cw, &mut input));
+    let prep = time(|| nv12::write_model_input(&cy, &cuv, cw, ch, cw, cw, MaskSize::SQUARE, &mut input));
 
     let (mut rs, mut rs_uv) = (Resampler::new(w), Resampler::new(w / 2));
     rs.aim(0.0, cw as f32, cw);
@@ -120,7 +120,7 @@ fn main() {
         .collect();
     // The blend's cost does not depend on what it blends over.
     let blurred = (y.clone(), uv.clone());
-    let mut up = MaskUpscaler::new(w);
+    let mut up = MaskUpscaler::new(w, MaskSize::SQUARE);
     let blend = time(|| {
         y.copy_from_slice(&blurred.0);
         uv.copy_from_slice(&blurred.1);
@@ -129,6 +129,16 @@ fn main() {
         nv12::blend_chroma(&sharp_uv, &mut uv, &up, w / 2, h / 2, w);
     }) - copy;
 
+    // Keeping the subject out of the blur, ahead of it: the mask is prepared
+    // here as it is in the daemon, so blend's prepare is not counted twice.
+    up.prepare(&mask);
+    let mut filler = studio_effects_daemon::fill::Fill::new();
+    let fill = time(|| {
+        y.copy_from_slice(&sharp_y);
+        uv.copy_from_slice(&sharp_uv);
+        blurrer.apply_filled(&mut y, &mut uv, w, h, w, w, radius, passes, &mut filler, &mask, &up);
+    }) - copy - blur;
+
     println!("capture {cw}x{ch}, output {w}x{h}, blur {radius} x{passes}");
     println!("  prep   {prep:6.3} ms");
     println!("  frame  {frame_stage:6.3} ms  ({})", if scaling { "resample" } else { "copy" });
@@ -136,6 +146,7 @@ fn main() {
         "  blur   {blur:6.3} ms  (at 1/{} size; {full_size:.3} ms at full size)",
         nv12::Blur::factor(w, h, radius)
     );
+    println!("  fill   {fill:6.3} ms  (subject out of the blur)");
     println!("  blend  {blend:6.3} ms  (prepare included)");
-    println!("  total  {:6.3} ms", prep + frame_stage + blur + blend);
+    println!("  total  {:6.3} ms", prep + frame_stage + fill + blur + blend);
 }

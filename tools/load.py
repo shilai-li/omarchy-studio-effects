@@ -38,7 +38,8 @@ def main() -> None:
     core = ov.Core()
     core.set_property({"CACHE_DIR": "/tmp/ov-cache"})
     model = core.read_model(MODEL)
-    frame = np.random.rand(1, 3, 256, 256).astype(np.float32)
+    # The image input's own shape: 256x256 for segmentation, 512x288 for matting.
+    frame = np.random.rand(*model.input(0).get_shape()).astype(np.float32)
     period = 1.0 / FPS
 
     print(f"holding {FPS} fps for {SECONDS}s per device\n")

@@ -21,7 +21,8 @@ def main() -> None:
     core = ov.Core()
     core.set_property({"CACHE_DIR": str(CACHE)})
     model = core.read_model(MODEL)
-    frame = np.random.rand(1, 3, 256, 256).astype(np.float32)
+    # The image input's own shape: 256x256 for segmentation, 512x288 for matting.
+    frame = np.random.rand(*model.input(0).get_shape()).astype(np.float32)
 
     print(f"model {MODEL}   devices {core.available_devices}\n")
     print(f"{'device':8} {'compile':>10} {'mean':>9} {'p50':>9} {'p99':>9} {'fps':>8}")

@@ -2,11 +2,31 @@
 //!
 //! The measurements in AGENTS.md say colour conversion costs six times what the
 //! model does, so nothing here ever materialises an RGB frame. The only pixels
-//! that become RGB are the 256x256 the model needs -- 65k of them instead of
-//! 2M -- and the composite runs on the Y and UV planes as they arrive.
+//! that become RGB are the few the model needs -- 65k to 147k of them instead
+//! of 2M -- and the composite runs on the Y and UV planes as they arrive.
 
-/// Model input side, and the side of the mask that comes back.
+/// Side of the square segmentation model's input, and of the mask it returns.
 pub const NET: usize = 256;
+
+/// A model's input grid, which is also the grid of the mask it hands back.
+///
+/// Not a constant, because the two models differ: segmentation is 256x256, and
+/// matting is 512x288 -- the frame's own 16:9, at a size where fingers survive.
+/// At 256x256 a 1080p frame was squashed to a square and a finger came out two
+/// or three pixels wide inside RVM's encoder, which is what blurred waving hands.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct MaskSize {
+    pub w: usize,
+    pub h: usize,
+}
+
+impl MaskSize {
+    pub const SQUARE: Self = Self { w: NET, h: NET };
+
+    pub fn len(self) -> usize {
+        self.w * self.h
+    }
+}
 
 /// Define a function whose body is compiled twice, for AVX2 and for baseline
 /// x86-64, with the copy chosen at run time.
@@ -73,32 +93,33 @@ fn yuv_to_rgb(y: u8, u: u8, v: u8) -> (f32, f32, f32) {
 }
 
 dispatch! {
-/// Fill a planar NCHW float tensor with the frame scaled to 256x256.
+/// Fill a planar NCHW float tensor with the frame scaled to the model's grid.
 ///
-/// Nearest-neighbour on purpose: the model runs at 256x256 and its output is a
-/// soft mask that gets bilinearly upscaled anyway, so a costlier sample here
-/// buys nothing a viewer could see.
+/// Nearest-neighbour on purpose: the model's output is a soft mask that gets
+/// bilinearly upscaled anyway, so a costlier sample here buys nothing a viewer
+/// could see. Checked at 512x288 on a waving hand: box-averaging the input gave
+/// the same mask as this.
 pub fn write_model_input(y_plane: &[u8], uv_plane: &[u8], width: usize, height: usize, y_stride: usize,
-                         uv_stride: usize, out: &mut [f32])
-    => model_input_rows(y_plane, uv_plane, width, height, y_stride, uv_stride, out);
+                         uv_stride: usize, net: MaskSize, out: &mut [f32])
+    => model_input_rows(y_plane, uv_plane, width, height, y_stride, uv_stride, net, out);
 }
 
 #[inline(always)]
 fn model_input_rows(y_plane: &[u8], uv_plane: &[u8], width: usize, height: usize, y_stride: usize,
-                    uv_stride: usize, out: &mut [f32]) {
-    debug_assert_eq!(out.len(), 3 * NET * NET);
-    let (r_plane, rest) = out.split_at_mut(NET * NET);
-    let (g_plane, b_plane) = rest.split_at_mut(NET * NET);
+                    uv_stride: usize, net: MaskSize, out: &mut [f32]) {
+    debug_assert_eq!(out.len(), 3 * net.len());
+    let (r_plane, rest) = out.split_at_mut(net.len());
+    let (g_plane, b_plane) = rest.split_at_mut(net.len());
 
-    for ny in 0..NET {
-        let sy = ny * height / NET;
+    for ny in 0..net.h {
+        let sy = ny * height / net.h;
         let y_row = sy * y_stride;
         let uv_row = (sy / 2) * uv_stride;
-        for nx in 0..NET {
-            let sx = nx * width / NET;
+        for nx in 0..net.w {
+            let sx = nx * width / net.w;
             let uv = uv_row + (sx & !1);
             let (r, g, b) = yuv_to_rgb(y_plane[y_row + sx], uv_plane[uv], uv_plane[uv + 1]);
-            let i = ny * NET + nx;
+            let i = ny * net.w + nx;
             r_plane[i] = r / 255.0;
             g_plane[i] = g / 255.0;
             b_plane[i] = b / 255.0;
@@ -346,20 +367,61 @@ impl Blur {
         r: usize,
         passes: usize,
     ) {
-        blur_frame(self, y, uv, w, h, y_stride, uv_stride, r, passes);
+        blur_frame(self, y, uv, w, h, y_stride, uv_stride, r, passes, &mut None);
+    }
+
+    /// Blur the background only: as `apply`, with the subject in `mask` filled
+    /// in with the background behind them on each shrunken plane before it is
+    /// blurred, so they do not glow into it. See fill.rs.
+    ///
+    /// Not at full size: below radius 10 the glow is narrower than the soft
+    /// edge of the mask, and filling every pixel of the frame cost 3.2 ms.
+    #[allow(clippy::too_many_arguments)]
+    pub fn apply_filled(
+        &mut self,
+        y: &mut [u8],
+        uv: &mut [u8],
+        w: usize,
+        h: usize,
+        y_stride: usize,
+        uv_stride: usize,
+        r: usize,
+        passes: usize,
+        fill: &mut crate::fill::Fill,
+        mask: &[f32],
+        like: &MaskUpscaler,
+    ) {
+        let mut hook = |chroma: bool, p: &mut [u8], pw: usize, ph: usize, scale: usize, r: usize| {
+            if chroma {
+                fill.chroma(p, pw, ph, scale, r, mask, like);
+            } else {
+                fill.luma(p, pw, ph, scale, r, mask, like);
+            }
+        };
+        blur_frame(self, y, uv, w, h, y_stride, uv_stride, r, passes, &mut Some(&mut hook));
     }
 
     #[inline(always)]
     fn frame(&mut self, y: &mut [u8], uv: &mut [u8], w: usize, h: usize, y_stride: usize, uv_stride: usize,
-             r: usize, passes: usize) {
+             r: usize, passes: usize, hook: &mut Hook) {
         let f = Self::factor(w, h, r);
-        self.plane::<1>(y, w, h, y_stride, r, passes, f);
-        self.plane::<2>(uv, w / 2, h / 2, uv_stride, r / 2, passes, f);
+        self.plane::<1>(y, w, h, y_stride, r, passes, f, hook);
+        self.plane::<2>(uv, w / 2, h / 2, uv_stride, r / 2, passes, f, hook);
     }
 
     /// One plane of `C` channels, `w` samples wide, radius `r` in its samples.
+    /// `hook`, if any, sees the shrunken plane just before it is blurred.
     #[inline(always)]
-    fn plane<const C: usize>(&mut self, p: &mut [u8], w: usize, h: usize, stride: usize, r: usize, passes: usize, f: usize) {
+    #[allow(clippy::too_many_arguments)]
+    fn plane<const C: usize>(&mut self, p: &mut [u8], w: usize, h: usize, stride: usize, r: usize, passes: usize,
+                             f: usize, hook: &mut Hook) {
+        // Full-size luma pixels per sample of the shrunken plane.
+        let scale = f * C;
+        let mut see = |q: &mut [u8], w: usize, h: usize, r: usize| {
+            if let Some(hook) = hook.as_mut() {
+                hook(C == 2, q, w, h, scale, r);
+            }
+        };
         let blur = |q: &mut [u8], scratch: &mut [u8], w: usize, h: usize, stride: usize, r: usize| {
             for _ in 0..passes {
                 blur_plane::<C>(q, scratch, w, h, stride, r);
@@ -369,12 +431,14 @@ impl Blur {
             4 => {
                 let (w1, h1) = halve::<C>(p, w, h, stride, &mut self.half);
                 let (w2, h2) = halve::<C>(&self.half, w1, h1, w1 * C, &mut self.quarter);
+                see(&mut self.quarter[..w2 * h2 * C], w2, h2, r / 4);
                 blur(&mut self.quarter, &mut self.scratch, w2, h2, w2 * C, r / 4);
                 double::<C>(&self.quarter, w2, h2, &mut self.half, w1 * C, &mut self.stretch);
                 double::<C>(&self.half, w1, h1, p, stride, &mut self.stretch);
             }
             2 => {
                 let (w1, h1) = halve::<C>(p, w, h, stride, &mut self.half);
+                see(&mut self.half[..w1 * h1 * C], w1, h1, r / 2);
                 blur(&mut self.half, &mut self.scratch, w1, h1, w1 * C, r / 2);
                 double::<C>(&self.half, w1, h1, p, stride, &mut self.stretch);
             }
@@ -387,9 +451,14 @@ dispatch! {
 /// `Blur::apply`, as one function so the whole frame's blur is a single AVX2
 /// copy: shrink, blur and stretch together.
 fn blur_frame(b: &mut Blur, y: &mut [u8], uv: &mut [u8], w: usize, h: usize, y_stride: usize,
-              uv_stride: usize, r: usize, passes: usize)
-    => b.frame(y, uv, w, h, y_stride, uv_stride, r, passes);
+              uv_stride: usize, r: usize, passes: usize, hook: &mut Hook)
+    => b.frame(y, uv, w, h, y_stride, uv_stride, r, passes, hook);
 }
+
+/// Something to run on each shrunken plane before it is blurred: whether it is
+/// chroma, the packed plane, its width and height in samples, full-size luma
+/// pixels per sample, and the radius it is about to be blurred at.
+type Hook<'a> = Option<&'a mut dyn FnMut(bool, &mut [u8], usize, usize, usize, usize)>;
 
 /// Halve a plane of `C` interleaved channels, `w` samples wide, into `dst`
 /// packed: each sample the rounded mean of a 2x2 block. A flat plane stays
@@ -458,26 +527,26 @@ fn double<const C: usize>(lo: &[u8], ow: usize, oh: usize, dst: &mut [u8], strid
 ///
 /// Taken from the segmentation mask rather than a face detector: the mask is
 /// already a per-pixel map of the subject against everything else, so the
-/// subject's position costs nothing beyond a scan of 65k values. A second model
+/// subject's position costs nothing beyond one scan of the mask. A second model
 /// would cost another inference and could disagree with the one doing the
 /// compositing.
 ///
 /// Rows and columns need a minimum run of foreground to count, so a handful of
 /// stray confident pixels -- a hand at the frame edge, a patch of noise on a
 /// blank wall -- cannot drag the frame across the room.
-pub fn subject_box(mask: &[f32], threshold: f32, min_run: usize) -> Option<(usize, usize, usize, usize)> {
-    let mut cols = [0u16; NET];
-    let mut rows = [0u16; NET];
-    for y in 0..NET {
-        for x in 0..NET {
-            if mask[y * NET + x] >= threshold {
+pub fn subject_box(mask: &[f32], size: MaskSize, threshold: f32, min_run: usize) -> Option<(usize, usize, usize, usize)> {
+    let mut cols = vec![0u16; size.w];
+    let mut rows = vec![0u16; size.h];
+    for y in 0..size.h {
+        for x in 0..size.w {
+            if mask[y * size.w + x] >= threshold {
                 cols[x] += 1;
                 rows[y] += 1;
             }
         }
     }
 
-    let span = |counts: &[u16; NET]| -> Option<(usize, usize)> {
+    let span = |counts: &[u16]| -> Option<(usize, usize)> {
         let first = counts.iter().position(|&c| c as usize >= min_run)?;
         let last = counts.iter().rposition(|&c| c as usize >= min_run)?;
         Some((first, last))
@@ -686,7 +755,7 @@ pub struct MaskUpscaler {
     /// toward the next one.
     x_idx: Vec<u32>,
     x_frac: Vec<u32>,
-    /// The 256 mask rows, each stretched to output width.
+    /// Every mask row, each stretched to output width.
     band: Vec<u8>,
     /// The mask quantised to 8-bit once per frame, so the horizontal stretch
     /// is integer-only. Doing the float clamp at output width instead meant
@@ -694,6 +763,8 @@ pub struct MaskUpscaler {
     /// -- for a 256x256 source.
     quantized: Vec<u8>,
     width: usize,
+    /// The mask's own grid, which is the model's.
+    mask: MaskSize,
     /// The slice of the mask the output covers, in mask units. The whole mask
     /// when the output is the whole frame; a sub-range when framing has cropped
     /// into it, because the output then shows only part of what was segmented.
@@ -704,20 +775,36 @@ pub struct MaskUpscaler {
 }
 
 impl MaskUpscaler {
-    pub fn new(width: usize) -> Self {
+    pub fn new(width: usize, mask: MaskSize) -> Self {
         let mut me = Self {
             x_idx: vec![0; width],
             x_frac: vec![0; width],
-            band: vec![0; NET * width],
-            quantized: vec![0; NET * NET],
+            band: vec![0; mask.h * width],
+            quantized: vec![0; mask.len()],
             width,
+            mask,
             x0: 0.0,
-            x_span: (NET - 1) as f32,
+            x_span: (mask.w - 1) as f32,
             y0: 0.0,
-            y_span: (NET - 1) as f32,
+            y_span: (mask.h - 1) as f32,
         };
         me.recompute_columns();
         me
+    }
+
+    /// The output width this stretches to.
+    pub fn width(&self) -> usize {
+        self.width
+    }
+
+    /// The mask grid this was made for.
+    pub fn mask_size(&self) -> MaskSize {
+        self.mask
+    }
+
+    /// Show the same part of the same mask as `other`, at this one's width.
+    pub fn aim_like(&mut self, other: &MaskUpscaler) {
+        self.aim(other.x0, other.x_span, other.y0, other.y_span);
     }
 
     /// Point the upscaler at the part of the mask the output actually shows.
@@ -726,12 +813,12 @@ impl MaskUpscaler {
     /// crop rectangle, rather than this having to know about capture sizes.
     /// Both spans are the *whole* mask by default, which is the uncropped case.
     pub fn aim(&mut self, x0: f32, x_span: f32, y0: f32, y_span: f32) {
-        let limit = (NET - 1) as f32;
+        let (x_limit, y_limit) = ((self.mask.w - 1) as f32, (self.mask.h - 1) as f32);
         let changed = self.x0 != x0 || self.x_span != x_span;
-        self.x0 = x0.clamp(0.0, limit);
-        self.x_span = x_span.clamp(1.0, limit);
-        self.y0 = y0.clamp(0.0, limit);
-        self.y_span = y_span.clamp(1.0, limit);
+        self.x0 = x0.clamp(0.0, x_limit);
+        self.x_span = x_span.clamp(1.0, x_limit);
+        self.y0 = y0.clamp(0.0, y_limit);
+        self.y_span = y_span.clamp(1.0, y_limit);
         // The column table only depends on the horizontal aim, and framing
         // holds still most of the time by design.
         if changed {
@@ -743,7 +830,7 @@ impl MaskUpscaler {
         for col in 0..self.width {
             // Fixed point with an 8-bit fraction, so the lerp stays in integers.
             let x = self.x0 + self.x_span * col as f32 / self.width as f32;
-            let x = x.clamp(0.0, (NET - 1) as f32);
+            let x = x.clamp(0.0, (self.mask.w - 1) as f32);
             self.x_idx[col] = x as u32;
             self.x_frac[col] = ((x - x.floor()) * 256.0) as u32;
         }
@@ -754,14 +841,15 @@ impl MaskUpscaler {
         for (q, &v) in self.quantized.iter_mut().zip(mask) {
             *q = (v.clamp(0.0, 1.0) * 255.0) as u8;
         }
-        for row in 0..NET {
-            let src = &self.quantized[row * NET..(row + 1) * NET];
+        let mw = self.mask.w;
+        for row in 0..self.mask.h {
+            let src = &self.quantized[row * mw..(row + 1) * mw];
             let dst = &mut self.band[row * self.width..(row + 1) * self.width];
             for col in 0..self.width {
                 let i = self.x_idx[col] as usize;
                 let f = self.x_frac[col];
                 let a = u32::from(src[i]);
-                let b = u32::from(src[(i + 1).min(NET - 1)]);
+                let b = u32::from(src[(i + 1).min(mw - 1)]);
                 dst[col] = ((a * (256 - f) + b * f) >> 8) as u8;
             }
         }
@@ -770,11 +858,11 @@ impl MaskUpscaler {
     /// The two band rows bracketing output row `row` of `height`, and the
     /// 0..=256 weight toward the second.
     #[inline(always)]
-    fn rows(&self, row: usize, height: usize) -> (&[u8], &[u8], u32) {
+    pub(crate) fn rows(&self, row: usize, height: usize) -> (&[u8], &[u8], u32) {
         let y = self.y0 + self.y_span * row as f32 / height as f32;
-        let y = y.clamp(0.0, (NET - 1) as f32);
+        let y = y.clamp(0.0, (self.mask.h - 1) as f32);
         let (r0, f) = (y as usize, ((y - y.floor()) * 256.0) as u32);
-        let r1 = (r0 + 1).min(NET - 1);
+        let r1 = (r0 + 1).min(self.mask.h - 1);
         (
             &self.band[r0 * self.width..(r0 + 1) * self.width],
             &self.band[r1 * self.width..(r1 + 1) * self.width],
@@ -850,14 +938,62 @@ mod tests {
     /// reference the fast path is checked against, since "it looked right on a
     /// webcam" is not a test.
     fn reference_alpha(mask: &[f32], fx: f32, fy: f32) -> f32 {
-        let x = fx.clamp(0.0, (NET - 1) as f32);
-        let y = fy.clamp(0.0, (NET - 1) as f32);
+        reference_alpha_in(mask, MaskSize::SQUARE, fx, fy)
+    }
+
+    fn reference_alpha_in(mask: &[f32], size: MaskSize, fx: f32, fy: f32) -> f32 {
+        let x = fx.clamp(0.0, (size.w - 1) as f32);
+        let y = fy.clamp(0.0, (size.h - 1) as f32);
         let (x0, y0) = (x as usize, y as usize);
-        let (x1, y1) = ((x0 + 1).min(NET - 1), (y0 + 1).min(NET - 1));
+        let (x1, y1) = ((x0 + 1).min(size.w - 1), (y0 + 1).min(size.h - 1));
         let (tx, ty) = (x - x0 as f32, y - y0 as f32);
-        let top = mask[y0 * NET + x0] * (1.0 - tx) + mask[y0 * NET + x1] * tx;
-        let bot = mask[y1 * NET + x0] * (1.0 - tx) + mask[y1 * NET + x1] * tx;
+        let top = mask[y0 * size.w + x0] * (1.0 - tx) + mask[y0 * size.w + x1] * tx;
+        let bot = mask[y1 * size.w + x0] * (1.0 - tx) + mask[y1 * size.w + x1] * tx;
         (top * (1.0 - ty) + bot * ty) * 255.0
+    }
+
+    /// Matting's mask is 512x288, not square, and a mix-up of its width and
+    /// height reads the wrong row for every pixel -- a cut-out sliding off the
+    /// person rather than an error. Same reference, wide grid.
+    #[test]
+    fn upscaler_matches_float_bilinear_on_a_wide_mask() {
+        let size = MaskSize { w: 512, h: 288 };
+        let mut mask = vec![0.0f32; size.len()];
+        for y in 0..size.h {
+            for x in 0..size.w {
+                mask[y * size.w + x] = (x as f32 / size.w as f32) * (1.0 - y as f32 / size.h as f32);
+            }
+        }
+        let (w, h) = (1920, 1080);
+        let mut up = MaskUpscaler::new(w, size);
+        up.prepare(&mask);
+        let mut worst = 0.0f32;
+        for row in (0..h).step_by(7) {
+            for col in (0..w).step_by(11) {
+                let got = alpha_at(&up, col, row, h) as f32;
+                let want = reference_alpha_in(
+                    &mask,
+                    size,
+                    col as f32 * (size.w - 1) as f32 / w as f32,
+                    row as f32 * (size.h - 1) as f32 / h as f32,
+                );
+                worst = worst.max((got - want).abs());
+            }
+        }
+        // The same floor as the square case: 8-bit band, a rounding per axis.
+        assert!(worst <= 3.0, "worst deviation {worst} of 255");
+    }
+
+    #[test]
+    fn subject_box_reads_a_wide_mask_by_its_own_width() {
+        let size = MaskSize { w: 512, h: 288 };
+        let mut mask = vec![0.0f32; size.len()];
+        for y in 100..=250 {
+            for x in 300..=420 {
+                mask[y * size.w + x] = 1.0;
+            }
+        }
+        assert_eq!(subject_box(&mask, size, 0.5, 4), Some((300, 100, 420, 250)));
     }
 
     fn alpha_at(up: &MaskUpscaler, col: usize, row: usize, height: usize) -> u32 {
@@ -875,7 +1011,7 @@ mod tests {
             }
         }
         let (w, h) = (1920, 1080);
-        let mut up = MaskUpscaler::new(w);
+        let mut up = MaskUpscaler::new(w, MaskSize::SQUARE);
         up.prepare(&mask);
 
         let mut worst = 0.0f32;
@@ -911,13 +1047,13 @@ mod tests {
         let (w, h) = (640, 360);
 
         // Whole mask: the split lands in the middle of the output.
-        let mut whole = MaskUpscaler::new(w);
+        let mut whole = MaskUpscaler::new(w, MaskSize::SQUARE);
         whole.prepare(&mask);
         assert_eq!(alpha_at(&whole, 10, 0, h), 0, "far left is background");
         assert_eq!(alpha_at(&whole, w - 10, 0, h), 255, "far right is foreground");
 
         // Right half only: the output should be foreground throughout.
-        let mut right = MaskUpscaler::new(w);
+        let mut right = MaskUpscaler::new(w, MaskSize::SQUARE);
         right.aim((NET / 2) as f32, (NET / 2 - 1) as f32, 0.0, (NET - 1) as f32);
         right.prepare(&mask);
         assert_eq!(alpha_at(&right, 10, 0, h), 255, "aimed at the white half");
@@ -936,7 +1072,7 @@ mod tests {
             }
         }
         let (w, h) = (640, 360);
-        let mut up = MaskUpscaler::new(w);
+        let mut up = MaskUpscaler::new(w, MaskSize::SQUARE);
         up.aim(0.0, (NET - 1) as f32, (NET / 2) as f32, (NET / 2 - 1) as f32);
         up.prepare(&mask);
         assert_eq!(alpha_at(&up, 100, 5, h), 255, "aimed at the white half");
@@ -956,7 +1092,7 @@ mod tests {
             }
         }
         let (w, h) = (1280, 720);
-        let mut up = MaskUpscaler::new(w);
+        let mut up = MaskUpscaler::new(w, MaskSize::SQUARE);
         up.prepare(&mask);
 
         let band_at = |row: usize, col: usize| -> u8 {
@@ -989,7 +1125,7 @@ mod tests {
     fn upscaler_preserves_saturation() {
         let mask = vec![1.0f32; NET * NET];
         let (w, h) = (1280, 720);
-        let mut up = MaskUpscaler::new(w);
+        let mut up = MaskUpscaler::new(w, MaskSize::SQUARE);
         up.prepare(&mask);
         for row in (0..h).step_by(13) {
             for col in (0..w).step_by(17) {
@@ -1010,7 +1146,7 @@ mod tests {
         // A speck that must not widen the box.
         mask[10 * NET + 5] = 1.0;
 
-        let (l, t, r, b) = subject_box(&mask, 0.5, 4).expect("a blob is present");
+        let (l, t, r, b) = subject_box(&mask, MaskSize::SQUARE, 0.5, 4).expect("a blob is present");
         assert_eq!((l, t, r, b), (100, 80, 150, 200));
     }
 
@@ -1018,7 +1154,7 @@ mod tests {
     /// on it would slam the crop to a corner the moment the subject steps out.
     #[test]
     fn subject_box_of_an_empty_mask_is_none() {
-        assert!(subject_box(&vec![0.0f32; NET * NET], 0.5, 4).is_none());
+        assert!(subject_box(&vec![0.0f32; NET * NET], MaskSize::SQUARE, 0.5, 4).is_none());
     }
 
     /// Resampling the whole frame at 1:1 must return the frame.
@@ -1284,7 +1420,7 @@ mod tests {
         let (w, h) = (320usize, 180usize);
         let mask: Vec<f32> = noise(9, NET * NET).iter().map(|&v| f32::from(v) / 255.0).collect();
         for aim in [None, Some((40.0f32, 150.0f32, 30.0f32, 120.0f32))] {
-            let mut up = MaskUpscaler::new(w);
+            let mut up = MaskUpscaler::new(w, MaskSize::SQUARE);
             if let Some((a, b, c, d)) = aim {
                 up.aim(a, b, c, d);
             }
@@ -1421,7 +1557,7 @@ mod tests {
             });
         }
         let mask: Vec<f32> = noise(9, NET * NET).iter().map(|&v| f32::from(v) / 255.0).collect();
-        let mut up = MaskUpscaler::new(w);
+        let mut up = MaskUpscaler::new(w, MaskSize::SQUARE);
         up.prepare(&mask);
         both("blend_luma", || {
             let mut bg = uv0.repeat(2);
@@ -1435,7 +1571,7 @@ mod tests {
         });
         both("write_model_input", || {
             let mut out = vec![0f32; 3 * NET * NET];
-            write_model_input(&y0, &uv0, w, h, w, w, &mut out);
+            write_model_input(&y0, &uv0, w, h, w, w, MaskSize::SQUARE, &mut out);
             out.iter().map(|v| v.to_bits()).collect::<Vec<_>>()
         });
     }

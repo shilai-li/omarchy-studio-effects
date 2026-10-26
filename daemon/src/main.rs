@@ -2,14 +2,14 @@
 //! result as a second camera.
 //!
 //! See AGENTS.md for the measurements the design follows. The short version:
-//! inference is under a millisecond and colour conversion is not, so the frame
-//! never leaves NV12 and only the 256x256 the model needs is ever converted.
+//! inference is cheap on the NPU and colour conversion is not, so the frame
+//! never leaves NV12 and only the small grid the model needs is ever converted.
 
 
 use anyhow::{Context, Result};
 use std::sync::{Arc, Mutex};
 use studio_effects_daemon::control::{self, Effect, Fixed, Settings};
-use studio_effects_daemon::{background, camera, device, framing, mask, nv12, preview, segmenter, state};
+use studio_effects_daemon::{background, camera, device, fill, framing, mask, nv12, preview, segmenter, state};
 use clap::Parser;
 use gstreamer as gst;
 use gstreamer::prelude::*;
@@ -158,13 +158,15 @@ struct Args {
 
     /// Weight kept from the previous frame's mask, 0 to 0.95. Steadies edges
     /// while you hold still; too much smears the silhouette when you move.
+    /// Applies to `segmentation` only: `matting` gets smoothing that adapts to
+    /// motion instead, which a single weight cannot express.
     #[arg(long, default_value_t = 0.5)]
     mask_smoothing: f32,
 
     /// Which model to segment with: `segmentation`, `matting`, or a path.
     ///
     /// segmentation  MediaPipe selfie segmentation. 0.8 ms, a hard-edged mask.
-    /// matting       RobustVideoMatting. 3.4 ms, a true alpha matte with
+    /// matting       RobustVideoMatting at 512x288. A true alpha matte with
     ///               recurrent state, so edges hold still between frames.
     #[arg(long, default_value = "matting")]
     model: String,
@@ -246,6 +248,22 @@ fn parse_device(s: &str) -> Result<String, String> {
         d @ ("NPU" | "GPU" | "CPU") => Ok(d.to_string()),
         other => Err(format!("unknown device {other}, expected NPU, GPU or CPU")),
     }
+}
+
+/// Everything sized by the model's mask: the upscaler that stretches it to
+/// `width`, the filter that conditions it, and the buffer it is copied into.
+///
+/// A recurrent model gets motion-adaptive smoothing rather than the plain blend:
+/// the plain one trailed four or five stepped copies of a waving hand's edge
+/// behind it, and none at all left a still edge shimmering. See
+/// `MaskFilter::motion_adaptive`.
+fn mask_stage(seg: &segmenter::Segmenter, width: usize, args: &Args) -> (nv12::MaskUpscaler, mask::MaskFilter, Vec<f32>) {
+    let filter = if seg.recurrent {
+        mask::MaskFilter::motion_adaptive(args.mask_gain, 0.95, 0.7, seg.size.len())
+    } else {
+        mask::MaskFilter::new(args.mask_gain, args.mask_smoothing, seg.size.len())
+    };
+    (nv12::MaskUpscaler::new(width, seg.size), filter, vec![0.0f32; seg.size.len()])
 }
 
 /// Per-stage timing, because a frame budget is the only thing that matters here.
@@ -396,7 +414,17 @@ fn main() -> Result<()> {
         .transpose()?;
 
     let models = installed_models();
-    let mut loaded = args.model.trim_end_matches(".xml").rsplit('/').next().unwrap_or("segmentation").to_string();
+    // A path names one file and loads exactly that. Reducing it to its bare
+    // name, which this once did, looked the name up among the installed models
+    // first -- so `--model ~/checkout/models/matting.xml` quietly ran the
+    // installed matting.xml, an older and smaller one, and every comparison
+    // made against the checkout's measured the installed model twice.
+    let explicit = args.model.contains('/') || args.model.ends_with(".xml");
+    let mut loaded = if explicit {
+        args.model.clone()
+    } else {
+        args.model.trim_end_matches(".xml").to_string()
+    };
     let mut seg = segmenter::Segmenter::new(&resolve_model(&loaded), &args.cache, args.device.as_deref())?;
     println!("segmenting on {} with the {} model", seg.describe(), seg.model);
 
@@ -565,9 +593,8 @@ fn main() -> Result<()> {
     let mut sharp_y = vec![0u8; out_y_stride * h];
     let mut sharp_uv = vec![0u8; out_uv_stride * h.div_ceil(2)];
     let mut blur = nv12::Blur::new(w, h);
-    let mut upscaler = nv12::MaskUpscaler::new(w);
-    let mut mask_filter = mask::MaskFilter::new(args.mask_gain, args.mask_smoothing);
-    let mut mask = vec![0.0f32; nv12::NET * nv12::NET];
+    let mut fill = fill::Fill::new();
+    let (mut upscaler, mut mask_filter, mut mask) = mask_stage(&seg, w, &args);
 
     // Empty counts as unset: the systemd unit passes --background and
     // --background-dir unconditionally, because it has no way to omit one.
@@ -640,8 +667,9 @@ fn main() -> Result<()> {
 
     // A remembered model that is no longer installed -- uninstalled, renamed,
     // or saved on another machine -- falls back to what the config asked for
-    // rather than failing to start.
-    if !models.iter().any(|m| *m == initial.model) {
+    // rather than failing to start. A path asked for explicitly wins over
+    // anything remembered: it is a deliberate choice of one file.
+    if explicit || !models.iter().any(|m| *m == initial.model) {
         initial.model = loaded.clone();
     }
     if initial.model != loaded {
@@ -805,6 +833,10 @@ fn main() -> Result<()> {
                     println!("switched to the {} model on {}", other.model, other.describe());
                     seg = other;
                     loaded = wanted_model;
+                    // The new model may see a different grid, so everything
+                    // sized by the mask is rebuilt and the upscaler re-aimed.
+                    (upscaler, mask_filter, mask) = mask_stage(&seg, w, &args);
+                    aimed = None;
                 }
                 Err(e) => {
                     // Keep the working model and put the setting back, so the
@@ -817,7 +849,8 @@ fn main() -> Result<()> {
         }
 
         let t = Instant::now();
-        nv12::write_model_input(y_in, uv_in, cw, ch, y_stride, uv_stride, seg.input_buffer()?);
+        let net = seg.size;
+        nv12::write_model_input(y_in, uv_in, cw, ch, y_stride, uv_stride, net, seg.input_buffer()?);
         timings.prep += t.elapsed().as_secs_f64() * 1e3;
 
         let t = Instant::now();
@@ -830,7 +863,7 @@ fn main() -> Result<()> {
         let t = Instant::now();
         let crop = if want_framing {
             framer.set_max_zoom(zoom as f32 / 100.0);
-            framer.update(&mask)
+            framer.update(&mask, net)
         } else {
             None
         }
@@ -844,10 +877,10 @@ fn main() -> Result<()> {
             resampler.aim(crop.x, crop.w, cw);
             resampler_uv.aim(crop.x / 2.0, crop.w / 2.0, cw / 2);
             upscaler.aim(
-                crop.x * (nv12::NET - 1) as f32 / cw as f32,
-                crop.w * (nv12::NET - 1) as f32 / cw as f32,
-                crop.y * (nv12::NET - 1) as f32 / ch as f32,
-                crop.h * (nv12::NET - 1) as f32 / ch as f32,
+                crop.x * (net.w - 1) as f32 / cw as f32,
+                crop.w * (net.w - 1) as f32 / cw as f32,
+                crop.y * (net.h - 1) as f32 / ch as f32,
+                crop.h * (net.h - 1) as f32 / ch as f32,
             );
             aimed = Some(crop);
         }
@@ -896,6 +929,13 @@ fn main() -> Result<()> {
                     .copy_from_slice(&sharp_uv[row * out_uv_stride..row * out_uv_stride + w]);
             }
 
+            // Prepared once for the fill ahead of the blur and the blend after it.
+            let t = Instant::now();
+            if effect != Effect::None {
+                upscaler.prepare(&mask);
+            }
+            timings.blend += t.elapsed().as_secs_f64() * 1e3;
+
             let t = Instant::now();
             match effect {
                 Effect::Replace => {
@@ -908,7 +948,10 @@ fn main() -> Result<()> {
                     // the point where the boxiness stops being visible against
                     // a hard edge, which is why it is the default. At half or
                     // quarter size when the radius allows -- see nv12::Blur.
-                    blur.apply(y_out, uv_out, w, h, out_y_stride, out_uv_stride, blur_radius, passes);
+                    // The background only: blurring the subject along with it
+                    // smears them into it as a glow -- see fill.rs.
+                    blur.apply_filled(y_out, uv_out, w, h, out_y_stride, out_uv_stride, blur_radius, passes,
+                                      &mut fill, &mask, &upscaler);
                 }
                 Effect::None => {}
             }
@@ -922,7 +965,6 @@ fn main() -> Result<()> {
 
             let t = Instant::now();
             if effect != Effect::None {
-                upscaler.prepare(&mask);
                 nv12::blend_luma(&sharp_y, y_out, &upscaler, w, h, out_y_stride);
                 nv12::blend_chroma(&sharp_uv, uv_out, &upscaler, w / 2, h / 2, out_uv_stride);
             }

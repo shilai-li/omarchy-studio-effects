@@ -8,27 +8,56 @@
 //!
 //! Two filters fix it, in this order.
 
-use crate::nv12::NET;
-
 pub struct MaskFilter {
     previous: Vec<f32>,
     scratch: Vec<f32>,
     have_previous: bool,
     gain: f32,
     smoothing: f32,
+    /// When set, the smoothing fades out with how much a pixel changed: a
+    /// change this large or larger keeps nothing of the previous frame.
+    motion: Option<f32>,
 }
 
 impl MaskFilter {
     /// `gain` steepens the probability curve; `smoothing` is the weight kept
-    /// from the previous frame, in 0..1.
-    pub fn new(gain: f32, smoothing: f32) -> Self {
+    /// from the previous frame, in 0..1; `len` is the mask's size in values.
+    ///
+    /// Give a recurrent model no smoothing. It carries its own memory between
+    /// frames, so this blend smooths a second time, and the lag it adds is a
+    /// stepped ghost trailing behind a waving hand -- the hand's own position
+    /// only half covered, and the room beside it half sharp.
+    pub fn new(gain: f32, smoothing: f32, len: usize) -> Self {
         Self {
-            previous: vec![0.0; NET * NET],
-            scratch: vec![0.0; NET * NET],
+            previous: vec![0.0; len],
+            scratch: vec![0.0; len],
             have_previous: false,
             gain: gain.max(1.0),
             smoothing: smoothing.clamp(0.0, 0.95),
+            motion: None,
         }
+    }
+
+    /// Smoothing that holds a still edge steady and lets a moving one go: each
+    /// pixel keeps `smoothing` of the previous frame scaled down by how much it
+    /// changed, to nothing at a change of `threshold`.
+    ///
+    /// For the matting model. Its edges shimmer frame to frame even with its
+    /// own memory -- on a recorded clip the outline of a still head moved 0.028
+    /// a frame on average -- and the plain blend that would steady them trails
+    /// ghosts behind a waving hand. Jitter is a small change and a moving hand
+    /// a large one, so this tells them apart.
+    ///
+    /// It smooths the model's raw output and steepens afterwards, the other
+    /// way round from the plain blend. Smoothing the steepened mask left faint
+    /// outlines of a moving hand behind it: a pixel fading from 0.3 to 0 is a
+    /// small change, so it was held and decayed over several frames, an echo of
+    /// every edge the hand had passed. Steepening after sends those values to
+    /// 0. On the clip, at 0.95 and 0.7: still-edge jitter 0.015 a frame (the old
+    /// 256x256 build with the plain blend: 0.024), and faint values left of the
+    /// head on 0.3% of pixels, against 1.8% the other way round.
+    pub fn motion_adaptive(gain: f32, smoothing: f32, threshold: f32, len: usize) -> Self {
+        Self { motion: Some(threshold.max(1e-3)), ..Self::new(gain, smoothing, len) }
     }
 
     /// Steepen the model's probability around the halfway mark.
@@ -44,6 +73,10 @@ impl MaskFilter {
 
     /// Condition one frame's mask, in place.
     pub fn apply(&mut self, mask: &mut [f32]) {
+        if let Some(threshold) = self.motion {
+            self.apply_motion_adaptive(mask, threshold);
+            return;
+        }
         for (i, p) in mask.iter().enumerate() {
             self.scratch[i] = self.contrast(*p);
         }
@@ -63,14 +96,32 @@ impl MaskFilter {
         self.have_previous = true;
         mask.copy_from_slice(&self.scratch);
     }
+
+    /// Smooth the raw probability by how little it moved, then steepen it.
+    /// `previous` holds the smoothed raw values, not the steepened ones.
+    fn apply_motion_adaptive(&mut self, mask: &mut [f32], threshold: f32) {
+        if self.have_previous && self.smoothing > 0.0 {
+            let keep = self.smoothing;
+            for (p, prev) in mask.iter_mut().zip(&self.previous) {
+                let k = keep * (1.0 - (*p - prev).abs() / threshold).max(0.0);
+                *p = prev * k + *p * (1.0 - k);
+            }
+        }
+        self.previous.copy_from_slice(mask);
+        self.have_previous = true;
+        for p in mask.iter_mut() {
+            *p = self.contrast(*p);
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::nv12::NET;
 
     fn filtered(gain: f32, smoothing: f32, values: &[f32]) -> Vec<f32> {
-        let mut f = MaskFilter::new(gain, smoothing);
+        let mut f = MaskFilter::new(gain, smoothing, NET * NET);
         let mut buf = vec![0.0; NET * NET];
         buf[..values.len()].copy_from_slice(values);
         f.apply(&mut buf);
@@ -112,16 +163,54 @@ mod tests {
     /// toward zero -- otherwise effects visibly fade in on every start.
     #[test]
     fn the_first_frame_is_not_blended_with_nothing() {
-        let mut f = MaskFilter::new(3.0, 0.9);
+        let mut f = MaskFilter::new(3.0, 0.9, NET * NET);
         let mut buf = vec![1.0; NET * NET];
         f.apply(&mut buf);
         assert_eq!(buf[0], 1.0);
     }
 
+    /// A large change -- a hand arriving -- passes straight through, where the
+    /// plain blend would show it at half strength for a frame and trail after.
+    #[test]
+    fn motion_adaptive_lets_a_large_change_through() {
+        let mut f = MaskFilter::motion_adaptive(3.0, 0.95, 0.7, NET * NET);
+        let mut buf = vec![0.0; NET * NET];
+        f.apply(&mut buf);
+        buf.fill(1.0);
+        f.apply(&mut buf);
+        assert_eq!(buf[0], 1.0);
+    }
+
+    /// A small wobble on a held edge is mostly held back.
+    #[test]
+    fn motion_adaptive_steadies_a_small_wobble() {
+        let mut f = MaskFilter::motion_adaptive(1.0, 0.95, 0.7, NET * NET);
+        let mut buf = vec![0.5; NET * NET];
+        f.apply(&mut buf);
+        buf.fill(0.55);
+        f.apply(&mut buf);
+        // Unsteadied, 0.55 comes out of the smoothstep at 0.5748, a 0.075
+        // step; the filter lets through under a fifth of it.
+        assert!(buf[0] > 0.5 && buf[0] < 0.5 + 0.075 / 5.0, "moved to {}", buf[0]);
+    }
+
+    /// The echo this order exists to prevent: an edge that has moved on leaves
+    /// a pixel fading from part-subject to none. It must not linger as a faint
+    /// outline, which smoothing after the curve did for several frames.
+    #[test]
+    fn motion_adaptive_leaves_no_echo_of_a_passing_edge() {
+        let mut f = MaskFilter::motion_adaptive(3.0, 0.95, 0.7, NET * NET);
+        let mut buf = vec![0.45; NET * NET];
+        f.apply(&mut buf);
+        buf.fill(0.0);
+        f.apply(&mut buf);
+        assert!(buf[0] < 0.02, "an edge that left still shows at {}", buf[0]);
+    }
+
     /// Smoothing must converge, not stall short of the target.
     #[test]
     fn smoothing_converges_on_a_held_value() {
-        let mut f = MaskFilter::new(3.0, 0.6);
+        let mut f = MaskFilter::new(3.0, 0.6, NET * NET);
         let mut buf = vec![0.0; NET * NET];
         f.apply(&mut buf);
         for _ in 0..40 {

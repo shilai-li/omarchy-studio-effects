@@ -6,7 +6,7 @@
 //! behind a subject who appears pinned in place, which reads as a broken camera
 //! rather than as framing. Everything here exists to keep the crop still.
 
-use crate::nv12::{subject_box, NET};
+use crate::nv12::{subject_box, MaskSize};
 
 /// A crop, in source pixels.
 #[derive(Copy, Clone, Debug, PartialEq)]
@@ -61,11 +61,11 @@ impl Framing {
     }
 
     /// The crop this frame should use, or `None` to use the whole frame.
-    pub fn update(&mut self, mask: &[f32]) -> Option<Rect> {
+    pub fn update(&mut self, mask: &[f32], size: MaskSize) -> Option<Rect> {
         // A subject who has stepped out of shot leaves the camera where it is.
         // Falling back to the full frame would make walking out of view a hard
         // zoom-out, and walking back in a hard zoom-in.
-        let Some(target) = self.target_for(mask) else {
+        let Some(target) = self.target_for(mask, size) else {
             return self.current;
         };
 
@@ -97,12 +97,12 @@ impl Framing {
     }
 
     /// Where the crop would ideally sit for this mask.
-    fn target_for(&self, mask: &[f32]) -> Option<Rect> {
+    fn target_for(&self, mask: &[f32], size: MaskSize) -> Option<Rect> {
         // A minimum run of 4 keeps a stray confident pixel from being a subject.
-        let (left, top, right, bottom) = subject_box(mask, 0.5, 4)?;
+        let (left, top, right, bottom) = subject_box(mask, size, 0.5, 4)?;
 
-        let sx = self.width / NET as f32;
-        let sy = self.height / NET as f32;
+        let sx = self.width / size.w as f32;
+        let sy = self.height / size.h as f32;
         let (l, r) = (left as f32 * sx, (right + 1) as f32 * sx);
         let (t, b) = (top as f32 * sy, (bottom + 1) as f32 * sy);
         let (bw, bh) = (r - l, b - t);
@@ -149,6 +149,7 @@ impl Framing {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::nv12::NET;
 
     /// A blob in mask coordinates.
     fn mask_with(left: usize, top: usize, right: usize, bottom: usize) -> Vec<f32> {
@@ -168,7 +169,7 @@ mod tests {
     #[test]
     fn the_first_sighting_lands_rather_than_easing_in() {
         let mut f = framing();
-        let r = f.update(&mask_with(100, 80, 150, 200)).expect("a crop");
+        let r = f.update(&mask_with(100, 80, 150, 200), MaskSize::SQUARE).expect("a crop");
         // Centred on the subject, not on the frame.
         let (cx, _) = r.centre();
         assert!(cx < 1280.0 / 2.0, "should sit left of centre, got {cx}");
@@ -178,8 +179,8 @@ mod tests {
     #[test]
     fn a_small_movement_does_not_move_the_camera() {
         let mut f = framing();
-        let first = f.update(&mask_with(100, 80, 150, 200)).unwrap();
-        let after = f.update(&mask_with(101, 80, 151, 200)).unwrap();
+        let first = f.update(&mask_with(100, 80, 150, 200), MaskSize::SQUARE).unwrap();
+        let after = f.update(&mask_with(101, 80, 151, 200), MaskSize::SQUARE).unwrap();
         assert_eq!(first, after, "a one-pixel drift moved the frame");
     }
 
@@ -187,14 +188,14 @@ mod tests {
     #[test]
     fn a_large_movement_is_followed_slowly() {
         let mut f = framing();
-        let start = f.update(&mask_with(40, 80, 90, 200)).unwrap();
-        let step = f.update(&mask_with(160, 80, 210, 200)).unwrap();
+        let start = f.update(&mask_with(40, 80, 90, 200), MaskSize::SQUARE).unwrap();
+        let step = f.update(&mask_with(160, 80, 210, 200), MaskSize::SQUARE).unwrap();
         assert!(step.x > start.x, "should move toward the subject");
 
         // Slowly: one frame must cover only a small part of the distance.
         let mut settled = step;
         for _ in 0..200 {
-            settled = f.update(&mask_with(160, 80, 210, 200)).unwrap();
+            settled = f.update(&mask_with(160, 80, 210, 200), MaskSize::SQUARE).unwrap();
         }
         let travelled = (step.x - start.x).abs();
         let total = (settled.x - start.x).abs();
@@ -206,8 +207,8 @@ mod tests {
     #[test]
     fn losing_the_subject_holds_the_last_frame() {
         let mut f = framing();
-        let held = f.update(&mask_with(100, 80, 150, 200)).unwrap();
-        let empty = f.update(&vec![0.0f32; NET * NET]).unwrap();
+        let held = f.update(&mask_with(100, 80, 150, 200), MaskSize::SQUARE).unwrap();
+        let empty = f.update(&vec![0.0f32; NET * NET], MaskSize::SQUARE).unwrap();
         assert_eq!(held, empty);
     }
 
@@ -216,7 +217,7 @@ mod tests {
     fn the_crop_keeps_the_output_aspect() {
         let mut f = framing();
         for blob in [(100, 80, 150, 200), (10, 10, 240, 240), (120, 120, 130, 140)] {
-            let r = f.update(&mask_with(blob.0, blob.1, blob.2, blob.3)).unwrap();
+            let r = f.update(&mask_with(blob.0, blob.1, blob.2, blob.3), MaskSize::SQUARE).unwrap();
             let got = r.w / r.h;
             assert!((got - 1280.0 / 720.0).abs() < 0.01, "aspect {got} for {blob:?}");
         }
@@ -227,7 +228,7 @@ mod tests {
     fn the_crop_stays_inside_the_frame() {
         let mut f = framing();
         for blob in [(0, 0, 20, 20), (235, 235, 255, 255), (0, 100, 255, 200)] {
-            let r = f.update(&mask_with(blob.0, blob.1, blob.2, blob.3)).unwrap();
+            let r = f.update(&mask_with(blob.0, blob.1, blob.2, blob.3), MaskSize::SQUARE).unwrap();
             assert!(r.x >= -0.01 && r.y >= -0.01, "{r:?} starts outside");
             assert!(r.x + r.w <= 1280.01 && r.y + r.h <= 720.01, "{r:?} ends outside");
         }
@@ -238,7 +239,7 @@ mod tests {
     fn zoom_is_capped() {
         let mut f = framing();
         // A tiny subject would otherwise ask for an enormous crop-in.
-        let r = f.update(&mask_with(126, 126, 130, 130)).unwrap();
+        let r = f.update(&mask_with(126, 126, 130, 130), MaskSize::SQUARE).unwrap();
         assert!(r.w >= 1280.0 / 1.6 - 1.0, "cropped to {}, past the cap", r.w);
     }
 
@@ -249,10 +250,10 @@ mod tests {
         let distant = mask_with(120, 110, 140, 170);
 
         let mut tight = Framing::new(1280, 720, 1.6, 0.06, 0.92);
-        let a = tight.update(&distant).unwrap();
+        let a = tight.update(&distant, MaskSize::SQUARE).unwrap();
 
         let mut closer = Framing::new(1280, 720, 2.5, 0.06, 0.92);
-        let b = closer.update(&distant).unwrap();
+        let b = closer.update(&distant, MaskSize::SQUARE).unwrap();
 
         assert!(b.w < a.w, "2.5x should crop tighter than 1.6x: {} vs {}", b.w, a.w);
         assert!(b.w >= 1280.0 / 2.5 - 1.0, "and still respect its own cap: {}", b.w);
@@ -263,12 +264,12 @@ mod tests {
     fn the_zoom_limit_can_be_changed_while_running() {
         let distant = mask_with(120, 110, 140, 170);
         let mut f = framing();
-        let before = f.update(&distant).unwrap();
+        let before = f.update(&distant, MaskSize::SQUARE).unwrap();
         f.set_max_zoom(2.6);
         // Settle, since the crop eases toward its target rather than jumping.
         let mut after = before;
         for _ in 0..200 {
-            after = f.update(&distant).unwrap();
+            after = f.update(&distant, MaskSize::SQUARE).unwrap();
         }
         assert!(after.w < before.w, "should crop closer: {} vs {}", after.w, before.w);
     }

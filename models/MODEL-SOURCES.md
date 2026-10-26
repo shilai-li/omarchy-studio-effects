@@ -48,8 +48,9 @@ The full upstream release licence is preserved in
 
 **Modification notice:** Omarchy Studio Effects converts the release ONNX into
 `matting.xml` / `matting.bin`, freezes `downsample_ratio` at `0.5`, pins the image
-input to `[1,3,256,256]`, discovers and fixes recurrent-state shapes with a CPU
-inference, and compresses floating-point weights to FP16. The installed build
+input to `[1,3,288,512]`, discovers and fixes recurrent-state shapes with a CPU
+inference, removes the unused `fgr` foreground output, and compresses
+floating-point weights to FP16. The installed build
 record gives the conversion date and tool versions. The converted model remains
 GPL-3.0. We do not change the upstream PyTorch weights or source archives.
 
