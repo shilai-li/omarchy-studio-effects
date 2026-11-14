@@ -69,14 +69,18 @@ pub fn probe(device: &str) -> Result<Vec<Mode>> {
 ///
 /// What a machine can carry depends on where the model runs, and the defaults
 /// should not be tuned for the best machine. On an NPU or GPU the CPU is left
-/// for the call, and 1080p at up to 60 is affordable. On the CPU alone, 1080p is
-/// 2.25 times the pixels to decode, blur and blend, and a 60 fps camera doubles
-/// every per-frame cost again while halving the time to do it in -- and the
-/// thread count the CPU path picks assumes a 30 fps frame. A 2017 i5 on battery
-/// held 30 fps at 720p with the frame loop half idle, which is the point to aim
-/// for. Anything set in the config overrides this.
+/// for the call, and 1080p is affordable. On the CPU alone, 1080p is 2.25 times
+/// the pixels to decode, blur and blend, and the thread count the CPU path
+/// picks assumes a 30 fps frame. A 2017 i5 on battery held 30 fps at 720p with
+/// the frame loop half idle, which is the point to aim for.
+///
+/// 30 fps everywhere, NPU included. The default model cannot hold 60: matting
+/// waits 13-16 ms on the NPU, nearly all of a 16.7 ms frame, and fed a 60 fps
+/// stream the daemon ran at 108% of that budget and published 54 fps unevenly,
+/// at 74% of a core against 39% at 30 -- twice the CPU a second for frames a
+/// call does not transmit. Anything set in the config overrides this.
 pub fn ceiling(on_cpu: bool) -> (u32, u32, u32) {
-    if on_cpu { (1280, 720, 30) } else { (1920, 1080, 60) }
+    if on_cpu { (1280, 720, 30) } else { (1920, 1080, 30) }
 }
 
 /// What to hand `v4l2src` so the camera keeps its frame rate.
@@ -373,7 +377,7 @@ mod tests {
     /// Where the model runs decides what is affordable by default.
     #[test]
     fn the_cpu_gets_a_smaller_default_than_an_accelerator() {
-        assert_eq!(ceiling(false), (1920, 1080, 60));
+        assert_eq!(ceiling(false), (1920, 1080, 30));
         assert_eq!(ceiling(true), (1280, 720, 30));
     }
 
@@ -388,15 +392,16 @@ mod tests {
         assert_eq!(pick(&camera, w, h, fps), Some(jpeg(1920, 1080, 30)));
     }
 
-    /// A 60 fps camera on the CPU is held to 30: the cost per frame is the same
-    /// and the time to do it in is half.
+    /// A 60 fps camera is held to 30 by default, on an NPU too: matting cannot
+    /// keep up with 60 there. Asked for 60, it gets 60.
     #[test]
-    fn a_60fps_camera_is_held_to_30_on_the_cpu() {
+    fn a_60fps_camera_is_held_to_30_unless_asked() {
         let camera = [jpeg(1280, 720, 60), jpeg(1280, 720, 30)];
-        let (w, h, fps) = ceiling(true);
-        assert_eq!(pick(&camera, w, h, fps), Some(jpeg(1280, 720, 30)));
-        let (w, h, fps) = ceiling(false);
-        assert_eq!(pick(&camera, w, h, fps), Some(jpeg(1280, 720, 60)));
+        for on_cpu in [true, false] {
+            let (w, h, fps) = ceiling(on_cpu);
+            assert_eq!(pick(&camera, w, h, fps), Some(jpeg(1280, 720, 30)), "on_cpu {on_cpu}");
+        }
+        assert_eq!(pick(&camera, 1920, 1080, 60), Some(jpeg(1280, 720, 60)));
     }
 
     /// The control is named exactly as v4l2 does, and as a GStreamer structure.

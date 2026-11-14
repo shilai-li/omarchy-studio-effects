@@ -50,8 +50,8 @@ struct Args {
     /// gives 60 on a camera that has it and 30 on one that does not, where
     /// insisting on 60 would refuse to open the second.
     ///
-    /// Zero, the default, picks for the machine: 60 where the model runs on an
-    /// NPU or GPU, 30 where it runs on the CPU alone.
+    /// Zero, the default, is 30 on every machine: see camera::ceiling for why
+    /// not 60 where there is an NPU. Set it to 60 to ask a camera that has it.
     #[arg(long, default_value_t = 0)]
     fps: u32,
 
@@ -884,31 +884,28 @@ fn main() -> Result<()> {
             );
             aimed = Some(crop);
         }
-        // Nothing to scale and nothing cropped away: a straight row copy,
-        // which is what this used to do. Resampling a frame onto itself is
-        // three milliseconds of bilinear arithmetic for an identity, and most
-        // frames are this case -- framing off, capture the same size as output.
+        // Nothing to scale and nothing cropped away: the camera's own planes
+        // are the sharp frame, read where they are. Resampling a frame onto
+        // itself is three milliseconds of bilinear arithmetic for an
+        // identity, and copying it into a buffer of its own was two full-frame
+        // copies a frame for the blur and the blend to read back -- and most
+        // frames are this case, framing off and capture the same size as
+        // output.
         let untouched = !scaling
             && crop.x == 0.0
             && crop.y == 0.0
             && crop.w == cw as f32
             && crop.h == ch as f32;
-        if untouched {
-            for row in 0..h {
-                sharp_y[row * out_y_stride..row * out_y_stride + w]
-                    .copy_from_slice(&y_in[row * y_stride..row * y_stride + w]);
-            }
-            for row in 0..h / 2 {
-                sharp_uv[row * out_uv_stride..row * out_uv_stride + w]
-                    .copy_from_slice(&uv_in[row * uv_stride..row * uv_stride + w]);
-            }
+        let (fg_y, fg_uv, fg_y_stride, fg_uv_stride): (&[u8], &[u8], usize, usize) = if untouched {
+            (y_in, uv_in, y_stride, uv_stride)
         } else {
             resampler.luma(y_in, &mut sharp_y, y_stride, out_y_stride, h, crop.y, crop.h, ch);
             resampler_uv.chroma(
                 uv_in, &mut sharp_uv, uv_stride, out_uv_stride, h / 2,
                 crop.y / 2.0, crop.h / 2.0, ch / 2,
             );
-        }
+            (&sharp_y, &sharp_uv, out_y_stride, out_uv_stride)
+        };
         timings.frame += t.elapsed().as_secs_f64() * 1e3;
 
         let mut dst = gst::Buffer::with_size(out_info.size())?;
@@ -917,16 +914,19 @@ fn main() -> Result<()> {
             let mut out_frame = gst_video::VideoFrameRef::from_buffer_ref_writable(dst_ref, &out_info)?;
             let [y_out, uv_out, _, _] = out_frame.planes_data_mut();
 
-            // The background starts as a copy of the sharp frame; the subject
-            // is painted back over it afterwards. Neither the blur nor the
-            // image copy has to know anything about the mask this way.
-            for row in 0..h {
-                y_out[row * out_y_stride..row * out_y_stride + w]
-                    .copy_from_slice(&sharp_y[row * out_y_stride..row * out_y_stride + w]);
-            }
-            for row in 0..h / 2 {
-                uv_out[row * out_uv_stride..row * out_uv_stride + w]
-                    .copy_from_slice(&sharp_uv[row * out_uv_stride..row * out_uv_stride + w]);
+            // The background is drawn into the output first and the subject
+            // painted back over it afterwards, so neither the blur nor the
+            // image has to know anything about the mask. The blur reads the
+            // sharp frame itself and an image covers every pixel, so only an
+            // output that is the sharp frame -- no effect, or an image that
+            // is not decoded yet -- starts as a copy of it.
+            if effect == Effect::None || (effect == Effect::Replace && backdrop.is_none()) {
+                for row in 0..h {
+                    y_out[row * out_y_stride..][..w].copy_from_slice(&fg_y[row * fg_y_stride..][..w]);
+                }
+                for row in 0..h / 2 {
+                    uv_out[row * out_uv_stride..][..w].copy_from_slice(&fg_uv[row * fg_uv_stride..][..w]);
+                }
             }
 
             // Prepared once for the fill ahead of the blur and the blend after it.
@@ -950,8 +950,9 @@ fn main() -> Result<()> {
                     // quarter size when the radius allows -- see nv12::Blur.
                     // The background only: blurring the subject along with it
                     // smears them into it as a glow -- see fill.rs.
-                    blur.apply_filled(y_out, uv_out, w, h, out_y_stride, out_uv_stride, blur_radius, passes,
-                                      &mut fill, &mask, &upscaler);
+                    blur.apply_filled_from((fg_y, fg_uv, fg_y_stride, fg_uv_stride), y_out, uv_out, w, h,
+                                           out_y_stride, out_uv_stride, blur_radius, passes, &mut fill,
+                                           &upscaler);
                 }
                 Effect::None => {}
             }
@@ -965,8 +966,8 @@ fn main() -> Result<()> {
 
             let t = Instant::now();
             if effect != Effect::None {
-                nv12::blend_luma(&sharp_y, y_out, &upscaler, w, h, out_y_stride);
-                nv12::blend_chroma(&sharp_uv, uv_out, &upscaler, w / 2, h / 2, out_uv_stride);
+                nv12::blend_luma(fg_y, fg_y_stride, y_out, &upscaler, w, h, out_y_stride);
+                nv12::blend_chroma(fg_uv, fg_uv_stride, uv_out, &upscaler, w / 2, h / 2, out_uv_stride);
             }
             timings.blend += t.elapsed().as_secs_f64() * 1e3;
         }

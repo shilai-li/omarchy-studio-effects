@@ -14,14 +14,15 @@ INPUT=/dev/video0
 # What applications receive, and how fast. Zero, the default, picks for the
 # machine and then asks the camera what it has:
 #
-#   NPU or GPU   the biggest mode up to 1920x1080, at up to 60 fps
+#   NPU or GPU   the biggest mode up to 1920x1080, at up to 30 fps
 #   CPU alone    the biggest mode up to 1280x720, at up to 30 fps -- what a
 #                laptop without an NPU can carry with the camera on all day
 #
-# A camera with no mode that large gets its own best and is not stretched to fit;
-# one with no 60 fps runs at 30. Set WIDTH and HEIGHT to ask for something else
-# (1920 and 1080 on a CPU-only machine that can afford it), and FPS as the
-# ceiling on the rate. The daemon says what it got, once, in the journal:
+# A camera with no mode that large gets its own best and is not stretched to fit.
+# Set WIDTH and HEIGHT to ask for something else (1920 and 1080 on a CPU-only
+# machine that can afford it), and FPS as the ceiling on the rate. FPS=60 needs
+# MODEL=segmentation: matting takes most of a 60 fps frame on the NPU alone and
+# falls behind. The daemon says what it got, once, in the journal:
 #     camera delivers image/jpeg 1280x720 at 30/1 fps
 WIDTH=0
 HEIGHT=0

@@ -125,8 +125,8 @@ fn main() {
         y.copy_from_slice(&blurred.0);
         uv.copy_from_slice(&blurred.1);
         up.prepare(&mask);
-        nv12::blend_luma(&sharp_y, &mut y, &up, w, h, w);
-        nv12::blend_chroma(&sharp_uv, &mut uv, &up, w / 2, h / 2, w);
+        nv12::blend_luma(&sharp_y, w, &mut y, &up, w, h, w);
+        nv12::blend_chroma(&sharp_uv, w, &mut uv, &up, w / 2, h / 2, w);
     }) - copy;
 
     // Keeping the subject out of the blur, ahead of it: the mask is prepared
@@ -136,7 +136,7 @@ fn main() {
     let fill = time(|| {
         y.copy_from_slice(&sharp_y);
         uv.copy_from_slice(&sharp_uv);
-        blurrer.apply_filled(&mut y, &mut uv, w, h, w, w, radius, passes, &mut filler, &mask, &up);
+        blurrer.apply_filled(&mut y, &mut uv, w, h, w, w, radius, passes, &mut filler, &up);
     }) - copy - blur;
 
     println!("capture {cw}x{ch}, output {w}x{h}, blur {radius} x{passes}");

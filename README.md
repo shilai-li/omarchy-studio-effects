@@ -403,9 +403,10 @@ writes one processed frame as a PNG, which is the only way to see what the
 composite looks like without one.
 
 The picture is whatever the camera offers, chosen for the machine. With an NPU or
-GPU that is up to 1920x1080 at up to 60 fps -- 1080p at 30 on most laptop
-cameras. On the CPU alone it is up to 1280x720 at 30, which is what a laptop
-without an NPU can carry. A camera without that size gets its own best mode and
+GPU that is up to 1920x1080 at 30 fps; on the CPU alone, up to 1280x720 at 30,
+which is what a laptop without an NPU can carry. `FPS=60` asks a camera that has
+it for more, but the default matting model cannot keep up with 60 even on the
+NPU -- use `MODEL=segmentation` with it. A camera without that size gets its own best mode and
 is not stretched to fit, and a machine without an NPU runs the same models on its
 GPU, or on the CPU, with the same result -- on as few CPU threads as keep up.
 

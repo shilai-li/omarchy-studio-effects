@@ -208,6 +208,23 @@ unchanged decode read 60% dearer at the lower clock -- while in cycles the
 whole process went from 66 M a frame to 33 at this machine's config, and from
 51 M to 23 at the service default.
 
+It counts **user space only** (`perf_event_paranoid` 2 allows nothing more),
+so work moved into the kernel looks free. VA-API decode read as 43% fewer
+cycles for the whole daemon and cost *more* CPU time -- see "Hardware MJPEG
+decode is not the next step". When a change moves work into a driver, compare
+CPU time, back to back, as well.
+
+**A camera-free harness** gives repeatable numbers without the camera, the
+light or the service: 90 frames of a wallpaper with sensor noise, encoded as
+1080p MJPEG at quality 90, pushed into an `appsrc` ahead of the same
+`decodebin` at 30 fps, and a synthetic head-and-shoulders mask in place of the
+model's output so the fill and blend see a subject. It is not in the tree; it
+was four small edits to `main.rs` in a scratch copy, run under
+`tools/cycles.py` on E-cores 4-7. With it, at the service defaults (1080p,
+matting, blur 20 x1), the whole process is about 46 M cycles a frame: half the
+capture thread's MJPEG decode, a tenth inference and its input, the rest the
+effects.
+
 The timing line now carries what the stages cannot: the frame rate actually
 delivered, and the whole process's CPU per frame over every thread --
 `14.9 fps, 14.20 ms of CPU a frame over every thread` beside stages summing to
@@ -457,8 +474,9 @@ not the obvious way round:
   posterises. The fill's division happens on the coarse estimate in floats,
   and only stands in for pixels the subject covers.
 - **On the shrunken plane.** Done at full size it cost 3.2 ms a frame at 1080p.
-  On the plane the blur actually works at it is 0.61 ms at radius 72 (1/4
-  size) and 1.49 ms at radius 20 (1/2 size), `frame_cost`, P-core. Below radius
+  On the plane the blur actually works at it was 0.61 ms at radius 72 (1/4
+  size) and 1.49 ms at radius 20 (1/2 size), `frame_cost`, P-core; see "Half
+  the fill" below for what it costs now. Below radius
   10 the blur runs at full size and there is no fill: the glow is then
   narrower than the mask's own soft edge.
 - **Weights are `(1 - alpha)^2`.** Linear weights let the soft band at the
@@ -471,6 +489,38 @@ loaded the installed 256x256 matting model by mistake (see below); the fill's
 cost does not depend on the model, the inference figures in them do.
 `blurring_with_the_fill_leaves_no_glow` holds a pixel beside a bright subject
 to within 3 levels of the background, where the plain blur leaves it 40+ brighter.
+
+**Half the fill, and nothing done where nobody is.** At radius 20 the fill cost
+nearly twice the blur it serves. Four changes later the whole process is 39 M
+cycles a frame against 46.8 at the service defaults in the camera-free harness
+above (36.4 against 42.3 at blur 72 x3, 30.0 against 35.5 replacing), with every
+output byte as it was. On the real USB camera (1080p30 MJPEG, NPU matting,
+publishing to Studio Camera, E-cores 4-7, AC) it is 54.0 M against 45.8 at
+blur 20 -- 16.5 to 14.5 ms of CPU a frame, 50% of a core to 43.5% -- 50.0
+against 44.1 at blur 72 x3, and 42.7 against 37.6 replacing, all at 30.1 fps:
+
+| | before | after | held by |
+|---|---|---|---|
+| fill, 1080p r20, P-core | 1.83 ms | 0.94 | `the_fill_is_what_it_was` |
+| mask upscale | 0.43 ms | 0.15 | `blending_a_sparse_mask_is_what_it_was` |
+| blend | 0.25 ms | 0.09 | the same |
+| model input, matting | 0.40 ms | 0.16 | `model_input_is_what_it_was` |
+
+- The fill takes the frame upscaler's quantised mask instead of converting the
+  floats again, and its block sums are integers -- exact, because the float
+  sums were exact integers too.
+- `MaskUpscaler` keeps, per band row, the columns that can be non-zero. A row
+  of the mask with nobody in it stretches to nothing and blends to nothing, so
+  the upscaler, the fill and both blends work only between the first and last
+  subject column. Their savings assume a subject covering about a quarter of
+  the frame; one who fills it saves less. Columns the last frame wrote and
+  this one does not are cleared, and a re-aim clears the whole band.
+- The model input reads a column table worked out once per frame instead of a
+  division per pixel, into row runs a loop can widen.
+- The camera's buffer is the sharp frame. It used to be copied into one, and
+  that into the output for the blur to overwrite: the blur now reads it
+  (`Blur::apply_filled_from`) and the blends take its stride. Only `none`, and
+  `replace` before its image is decoded, still copy.
 
 **Inference latency has a floor of about 12 ms on this NPU.** None of
 `PERFORMANCE_HINT=LATENCY`, `NPU_TURBO`, `MODEL_PRIORITY` or an f16 precision
@@ -1149,12 +1199,19 @@ would refuse to open on most machines. A size the camera lacks is held to what i
 rather than being stretched.
 
 **What zero means depends on where the model runs.** `WIDTH`, `HEIGHT` and `FPS`
-default to 0, and `camera::ceiling` turns that into 1920x1080 at up to 60 where
+default to 0, and `camera::ceiling` turns that into 1920x1080 at up to 30 where
 the model is on an NPU or GPU and 1280x720 at up to 30 on the CPU alone. The
 defaults must not be tuned for the best machine: on the CPU, 1080p is 2.25 times
-the pixels to decode, blur and blend, a 60 fps camera doubles every per-frame cost
-while halving the time to do it in, and the CPU thread picker above assumes a
-30 fps frame. A 2017 i5 on battery held 30 fps at 720p with the frame loop half
+the pixels to decode, blur and blend, and the CPU thread picker above assumes a
+30 fps frame.
+
+The ceiling was 60 on an NPU, and the default model cannot hold it there.
+Matting waits 13-16 ms for the NPU, nearly all of a 16.7 ms frame. Fed a 60 fps
+stream in the camera-free harness, it ran at 108% of the budget and published
+54 fps unevenly -- frames dropped by the appsink, not a steady rate -- at 74% of
+a core against 39% at 30; segmentation held 60. No camera on this machine has a
+60 fps mode, which is how it went unseen. `FPS=60` is still there for anyone
+whose camera and model can take it. A 2017 i5 on battery held 30 fps at 720p with the frame loop half
 idle -- 17 ms of 33 -- which is the point to aim for. The segmenter is built
 before the camera is probed for exactly this reason. Anything set in the config
 wins, and the daemon says when it has applied the CPU ceiling.
@@ -1203,6 +1260,12 @@ time gst-launch-1.0 -q v4l2src device=/dev/video0 num-buffers=90 \
 Hardware MJPEG decode is not the next step. Through VA-API, via ffmpeg because
 GStreamer's `va` plugin is a separate package, it cost more than twice the CPU
 of `jpegdec`: downloading the decoded surface to system memory dominates.
+Re-measured with `gst-plugin-va` installed (`jpegparse ! vajpegdec ! vapostproc`
+to NV12) in the camera-free harness: decode alone fell from 10.3 to 6.6 ms of
+CPU a frame, but the whole daemon cost more, 13.9-14.2 ms against 12.9-13.3,
+with every frame-loop stage slower -- copying the frame once first did not
+change that. `tools/cycles.py` reported it as 43% fewer cycles, all of the
+saving being work moved into the kernel driver, which it does not count.
 
 **Backgrounds are a folder, read on every command, decoded off the frame
 loop.** Every JPG and PNG in `BACKGROUND_DIR` (default

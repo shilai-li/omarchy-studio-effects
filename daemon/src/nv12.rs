@@ -99,6 +99,13 @@ dispatch! {
 /// bilinearly upscaled anyway, so a costlier sample here buys nothing a viewer
 /// could see. Checked at 512x288 on a waving hand: box-averaging the input gave
 /// the same mask as this.
+///
+/// Which source column a model column reads is the same on every row, so it is
+/// worked out once rather than with a division per pixel, and each row is
+/// gathered into three short runs before it is converted: the conversion is
+/// then a straight loop the compiler can widen. 0.40 ms to 0.16 at 512x288 from
+/// 1080p, 0.18 to 0.08 at 256x256, P-core, and the same bits --
+/// `model_input_is_what_it_was` holds it to the per-pixel version.
 pub fn write_model_input(y_plane: &[u8], uv_plane: &[u8], width: usize, height: usize, y_stride: usize,
                          uv_stride: usize, net: MaskSize, out: &mut [f32])
     => model_input_rows(y_plane, uv_plane, width, height, y_stride, uv_stride, net, out);
@@ -111,21 +118,37 @@ fn model_input_rows(y_plane: &[u8], uv_plane: &[u8], width: usize, height: usize
     let (r_plane, rest) = out.split_at_mut(net.len());
     let (g_plane, b_plane) = rest.split_at_mut(net.len());
 
+    assert!(net.w <= MAX_NET_W, "a model {} wide is wider than the input table", net.w);
+    let n = net.w;
+    let mut cols = [0u32; MAX_NET_W];
+    for (nx, c) in cols[..n].iter_mut().enumerate() {
+        *c = (nx * width / n) as u32;
+    }
+    let (mut ys, mut us, mut vs) = ([0u8; MAX_NET_W], [0u8; MAX_NET_W], [0u8; MAX_NET_W]);
     for ny in 0..net.h {
         let sy = ny * height / net.h;
-        let y_row = sy * y_stride;
-        let uv_row = (sy / 2) * uv_stride;
-        for nx in 0..net.w {
-            let sx = nx * width / net.w;
-            let uv = uv_row + (sx & !1);
-            let (r, g, b) = yuv_to_rgb(y_plane[y_row + sx], uv_plane[uv], uv_plane[uv + 1]);
-            let i = ny * net.w + nx;
-            r_plane[i] = r / 255.0;
-            g_plane[i] = g / 255.0;
-            b_plane[i] = b / 255.0;
+        let y_row = &y_plane[sy * y_stride..][..width];
+        let uv_row = &uv_plane[(sy / 2) * uv_stride..][..width];
+        for (((y, u), v), &sx) in ys[..n].iter_mut().zip(&mut us[..n]).zip(&mut vs[..n]).zip(&cols[..n]) {
+            let sx = sx as usize;
+            *y = y_row[sx];
+            *u = uv_row[sx & !1];
+            *v = uv_row[(sx & !1) + 1];
+        }
+        let i = ny * n;
+        let (r_row, g_row, b_row) = (&mut r_plane[i..i + n], &mut g_plane[i..i + n], &mut b_plane[i..i + n]);
+        for nx in 0..n {
+            let (r, g, b) = yuv_to_rgb(ys[nx], us[nx], vs[nx]);
+            r_row[nx] = r / 255.0;
+            g_row[nx] = g / 255.0;
+            b_row[nx] = b / 255.0;
         }
     }
 }
+
+/// The widest model input `write_model_input` takes; its row runs live on the
+/// stack. Matting is 512.
+const MAX_NET_W: usize = 2048;
 
 dispatch! {
 /// Box blur one plane in place, separably, via a packed scratch buffer.
@@ -367,15 +390,18 @@ impl Blur {
         r: usize,
         passes: usize,
     ) {
-        blur_frame(self, y, uv, w, h, y_stride, uv_stride, r, passes, &mut None);
+        blur_frame(self, None, y, uv, w, h, y_stride, uv_stride, r, passes, &mut None);
     }
 
-    /// Blur the background only: as `apply`, with the subject in `mask` filled
+    /// Blur the background only: as `apply`, with the subject filled
     /// in with the background behind them on each shrunken plane before it is
     /// blurred, so they do not glow into it. See fill.rs.
     ///
     /// Not at full size: below radius 10 the glow is narrower than the soft
     /// edge of the mask, and filling every pixel of the frame cost 3.2 ms.
+    ///
+    /// The mask is the one `like` was last prepared with: the frame's own
+    /// upscaler, prepared for this frame before the blur.
     #[allow(clippy::too_many_arguments)]
     pub fn apply_filled(
         &mut self,
@@ -388,33 +414,66 @@ impl Blur {
         r: usize,
         passes: usize,
         fill: &mut crate::fill::Fill,
-        mask: &[f32],
         like: &MaskUpscaler,
     ) {
+        self.filled(None, y, uv, w, h, y_stride, uv_stride, r, passes, fill, like);
+    }
+
+    /// As `apply_filled`, reading the sharp frame from `src` -- its luma and
+    /// chroma planes and their strides -- and writing the blurred one to `y`
+    /// and `uv`, which need not hold anything beforehand.
+    ///
+    /// So the camera's own buffer can be blurred without first being copied
+    /// into the output, only for the blur to overwrite the copy: the shrink
+    /// reads the source anyway. At full size, below radius 10, it copies.
+    #[allow(clippy::too_many_arguments)]
+    pub fn apply_filled_from(
+        &mut self,
+        src: (&[u8], &[u8], usize, usize),
+        y: &mut [u8],
+        uv: &mut [u8],
+        w: usize,
+        h: usize,
+        y_stride: usize,
+        uv_stride: usize,
+        r: usize,
+        passes: usize,
+        fill: &mut crate::fill::Fill,
+        like: &MaskUpscaler,
+    ) {
+        self.filled(Some(src), y, uv, w, h, y_stride, uv_stride, r, passes, fill, like);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn filled(&mut self, src: Src, y: &mut [u8], uv: &mut [u8], w: usize, h: usize, y_stride: usize,
+              uv_stride: usize, r: usize, passes: usize, fill: &mut crate::fill::Fill, like: &MaskUpscaler) {
         let mut hook = |chroma: bool, p: &mut [u8], pw: usize, ph: usize, scale: usize, r: usize| {
             if chroma {
-                fill.chroma(p, pw, ph, scale, r, mask, like);
+                fill.chroma(p, pw, ph, scale, r, like);
             } else {
-                fill.luma(p, pw, ph, scale, r, mask, like);
+                fill.luma(p, pw, ph, scale, r, like);
             }
         };
-        blur_frame(self, y, uv, w, h, y_stride, uv_stride, r, passes, &mut Some(&mut hook));
+        blur_frame(self, src, y, uv, w, h, y_stride, uv_stride, r, passes, &mut Some(&mut hook));
     }
 
-    #[inline(always)]
-    fn frame(&mut self, y: &mut [u8], uv: &mut [u8], w: usize, h: usize, y_stride: usize, uv_stride: usize,
-             r: usize, passes: usize, hook: &mut Hook) {
-        let f = Self::factor(w, h, r);
-        self.plane::<1>(y, w, h, y_stride, r, passes, f, hook);
-        self.plane::<2>(uv, w / 2, h / 2, uv_stride, r / 2, passes, f, hook);
-    }
-
-    /// One plane of `C` channels, `w` samples wide, radius `r` in its samples.
-    /// `hook`, if any, sees the shrunken plane just before it is blurred.
     #[inline(always)]
     #[allow(clippy::too_many_arguments)]
-    fn plane<const C: usize>(&mut self, p: &mut [u8], w: usize, h: usize, stride: usize, r: usize, passes: usize,
-                             f: usize, hook: &mut Hook) {
+    fn frame(&mut self, src: Src, y: &mut [u8], uv: &mut [u8], w: usize, h: usize, y_stride: usize,
+             uv_stride: usize, r: usize, passes: usize, hook: &mut Hook) {
+        let f = Self::factor(w, h, r);
+        self.plane::<1>(src.map(|s| (s.0, s.2)), y, w, h, y_stride, r, passes, f, hook);
+        self.plane::<2>(src.map(|s| (s.1, s.3)), uv, w / 2, h / 2, uv_stride, r / 2, passes, f, hook);
+    }
+
+    /// One plane of `C` channels, `w` samples wide, radius `r` in its samples,
+    /// read from `src` (a plane and its stride) when given and from `p`
+    /// otherwise, and written to `p`. `hook`, if any, sees the shrunken plane
+    /// just before it is blurred.
+    #[inline(always)]
+    #[allow(clippy::too_many_arguments)]
+    fn plane<const C: usize>(&mut self, src: Option<(&[u8], usize)>, p: &mut [u8], w: usize, h: usize,
+                             stride: usize, r: usize, passes: usize, f: usize, hook: &mut Hook) {
         // Full-size luma pixels per sample of the shrunken plane.
         let scale = f * C;
         let mut see = |q: &mut [u8], w: usize, h: usize, r: usize| {
@@ -429,7 +488,10 @@ impl Blur {
         };
         match f {
             4 => {
-                let (w1, h1) = halve::<C>(p, w, h, stride, &mut self.half);
+                let (w1, h1) = match src {
+                    Some((s, s_stride)) => halve::<C>(s, w, h, s_stride, &mut self.half),
+                    None => halve::<C>(p, w, h, stride, &mut self.half),
+                };
                 let (w2, h2) = halve::<C>(&self.half, w1, h1, w1 * C, &mut self.quarter);
                 see(&mut self.quarter[..w2 * h2 * C], w2, h2, r / 4);
                 blur(&mut self.quarter, &mut self.scratch, w2, h2, w2 * C, r / 4);
@@ -437,12 +499,22 @@ impl Blur {
                 double::<C>(&self.half, w1, h1, p, stride, &mut self.stretch);
             }
             2 => {
-                let (w1, h1) = halve::<C>(p, w, h, stride, &mut self.half);
+                let (w1, h1) = match src {
+                    Some((s, s_stride)) => halve::<C>(s, w, h, s_stride, &mut self.half),
+                    None => halve::<C>(p, w, h, stride, &mut self.half),
+                };
                 see(&mut self.half[..w1 * h1 * C], w1, h1, r / 2);
                 blur(&mut self.half, &mut self.scratch, w1, h1, w1 * C, r / 2);
                 double::<C>(&self.half, w1, h1, p, stride, &mut self.stretch);
             }
-            _ => blur(p, &mut self.scratch, w, h, stride, r),
+            _ => {
+                if let Some((s, s_stride)) = src {
+                    for row in 0..h {
+                        p[row * stride..][..w * C].copy_from_slice(&s[row * s_stride..][..w * C]);
+                    }
+                }
+                blur(p, &mut self.scratch, w, h, stride, r)
+            }
         }
     }
 }
@@ -450,10 +522,14 @@ impl Blur {
 dispatch! {
 /// `Blur::apply`, as one function so the whole frame's blur is a single AVX2
 /// copy: shrink, blur and stretch together.
-fn blur_frame(b: &mut Blur, y: &mut [u8], uv: &mut [u8], w: usize, h: usize, y_stride: usize,
+fn blur_frame(b: &mut Blur, src: Src, y: &mut [u8], uv: &mut [u8], w: usize, h: usize, y_stride: usize,
               uv_stride: usize, r: usize, passes: usize, hook: &mut Hook)
-    => b.frame(y, uv, w, h, y_stride, uv_stride, r, passes, hook);
+    => b.frame(src, y, uv, w, h, y_stride, uv_stride, r, passes, hook);
 }
+
+/// Where a blur reads the sharp frame from when it is not the frame it writes:
+/// luma, chroma, and their strides.
+type Src<'a> = Option<(&'a [u8], &'a [u8], usize, usize)>;
 
 /// Something to run on each shrunken plane before it is blurred: whether it is
 /// chroma, the packed plane, its width and height in samples, full-size luma
@@ -763,6 +839,14 @@ pub struct MaskUpscaler {
     /// -- for a 256x256 source.
     quantized: Vec<u8>,
     width: usize,
+    /// For each mask column (and one past the last), the first output column
+    /// that reads it or anything right of it. `x_idx` never steps backwards,
+    /// so this is what turns a run of mask columns into a run of output ones.
+    first_col: Vec<u32>,
+    /// Per band row, the output columns `[start, end)` that may be non-zero;
+    /// everything outside is zero. Most of a frame is background, and a row of
+    /// the mask with nobody in it is a row of the band with nothing to blend.
+    span: Vec<(u32, u32)>,
     /// The mask's own grid, which is the model's.
     mask: MaskSize,
     /// The slice of the mask the output covers, in mask units. The whole mask
@@ -782,6 +866,8 @@ impl MaskUpscaler {
             band: vec![0; mask.h * width],
             quantized: vec![0; mask.len()],
             width,
+            first_col: vec![0; mask.w + 1],
+            span: vec![(0, 0); mask.h],
             mask,
             x0: 0.0,
             x_span: (mask.w - 1) as f32,
@@ -834,6 +920,20 @@ impl MaskUpscaler {
             self.x_idx[col] = x as u32;
             self.x_frac[col] = ((x - x.floor()) * 256.0) as u32;
         }
+        let mut col = 0;
+        for m in 0..=self.mask.w {
+            while col < self.width && (self.x_idx[col] as usize) < m {
+                col += 1;
+            }
+            self.first_col[m] = col as u32;
+        }
+        // The band was stretched with the old table; start it over at zero.
+        for (row, span) in self.span.iter_mut().enumerate() {
+            if span.1 > span.0 {
+                self.band[row * self.width..(row + 1) * self.width].fill(0);
+            }
+            *span = (0, 0);
+        }
     }
 
     /// Stretch every mask row to frame width. Once per frame, before blending.
@@ -841,18 +941,92 @@ impl MaskUpscaler {
         for (q, &v) in self.quantized.iter_mut().zip(mask) {
             *q = (v.clamp(0.0, 1.0) * 255.0) as u8;
         }
+        self.stretch();
+    }
+
+    /// The mask as bytes, as the last `prepare` quantised it.
+    pub fn quantized(&self) -> &[u8] {
+        &self.quantized
+    }
+
+    /// `prepare`, from a mask another upscaler of the same grid has already
+    /// quantised -- the fill's, from the frame's -- so it is converted once.
+    pub fn prepare_quantized(&mut self, quantized: &[u8]) {
+        self.quantized.copy_from_slice(quantized);
+        self.stretch();
+    }
+
+    /// Whether the last prepared mask was zero everywhere.
+    pub fn is_empty(&self) -> bool {
+        self.span.iter().all(|s| s.1 <= s.0)
+    }
+
+    /// The horizontal stretch, only between the first and last non-zero mask
+    /// columns of each row: outside them a bilinear stretch is zero, so it is
+    /// cleared rather than computed, and only where the last frame left
+    /// something. 0.43 ms to 0.15 at 1080p with a subject covering a quarter
+    /// of the frame; a subject filling it saves less.
+    fn stretch(&mut self) {
         let mw = self.mask.w;
         for row in 0..self.mask.h {
             let src = &self.quantized[row * mw..(row + 1) * mw];
             let dst = &mut self.band[row * self.width..(row + 1) * self.width];
-            for col in 0..self.width {
+            let (c0, c1) = match src.iter().position(|&v| v != 0) {
+                None => (0, 0),
+                Some(lo) => {
+                    let hi = src.iter().rposition(|&v| v != 0).unwrap_or(lo);
+                    // An output column reads its mask column and the next, so
+                    // the one before the first non-zero can see it.
+                    (self.first_col[lo.saturating_sub(1)] as usize, self.first_col[hi + 1] as usize)
+                }
+            };
+            let (p0, p1) = (self.span[row].0 as usize, self.span[row].1 as usize);
+            if p1 > p0 {
+                if c1 <= c0 {
+                    dst[p0..p1].fill(0);
+                } else {
+                    if p0 < c0 {
+                        dst[p0..c0.min(p1)].fill(0);
+                    }
+                    if p1 > c1 {
+                        dst[c1.max(p0)..p1].fill(0);
+                    }
+                }
+            }
+            for col in c0..c1 {
                 let i = self.x_idx[col] as usize;
                 let f = self.x_frac[col];
                 let a = u32::from(src[i]);
                 let b = u32::from(src[(i + 1).min(mw - 1)]);
                 dst[col] = ((a * (256 - f) + b * f) >> 8) as u8;
             }
+            self.span[row] = (c0 as u32, c1 as u32);
         }
+    }
+
+    /// As `rows`, with the output columns `[start, end)` outside which both
+    /// rows are zero.
+    #[inline(always)]
+    pub(crate) fn rows_span(&self, row: usize, height: usize) -> (&[u8], &[u8], u32, usize, usize) {
+        let y = self.y0 + self.y_span * row as f32 / height as f32;
+        let y = y.clamp(0.0, (self.mask.h - 1) as f32);
+        let (r0, f) = (y as usize, ((y - y.floor()) * 256.0) as u32);
+        let r1 = (r0 + 1).min(self.mask.h - 1);
+        let (a, b) = (self.span[r0], self.span[r1]);
+        let (c0, c1) = if a.1 <= a.0 {
+            b
+        } else if b.1 <= b.0 {
+            a
+        } else {
+            (a.0.min(b.0), a.1.max(b.1))
+        };
+        (
+            &self.band[r0 * self.width..(r0 + 1) * self.width],
+            &self.band[r1 * self.width..(r1 + 1) * self.width],
+            f,
+            c0 as usize,
+            (c1 as usize).max(c0 as usize),
+        )
     }
 
     /// The two band rows bracketing output row `row` of `height`, and the
@@ -879,19 +1053,28 @@ dispatch! {
 /// 255 - a do. Half the lane width is twice the pixels per instruction, and the
 /// same bytes -- 3.4x on this machine's baseline build, where the u32 version
 /// left the compiler emulating a 32-bit multiply it has no instruction for.
-pub fn blend_luma(fg: &[u8], bg: &mut [u8], up: &MaskUpscaler, w: usize, h: usize, stride: usize)
-    => blend_luma_rows(fg, bg, up, w, h, stride);
+///
+/// `fg` has a stride of its own, so the camera's buffer can be blended straight
+/// from rather than copied first. Only the columns the mask reaches are walked:
+/// where it is zero the blend leaves the background exactly as it was.
+pub fn blend_luma(fg: &[u8], fg_stride: usize, bg: &mut [u8], up: &MaskUpscaler, w: usize, h: usize,
+                  stride: usize)
+    => blend_luma_rows(fg, fg_stride, bg, up, w, h, stride);
 }
 
 #[inline(always)]
-fn blend_luma_rows(fg: &[u8], bg: &mut [u8], up: &MaskUpscaler, w: usize, h: usize, stride: usize) {
+fn blend_luma_rows(fg: &[u8], fg_stride: usize, bg: &mut [u8], up: &MaskUpscaler, w: usize, h: usize,
+                   stride: usize) {
     for row in 0..h {
-        let (m0, m1, vf) = up.rows(row, h);
+        let (m0, m1, vf, c0, c1) = up.rows_span(row, h);
+        let (c0, c1) = (c0.min(w), c1.min(w));
+        if c1 <= c0 {
+            continue;
+        }
         let (vf, keep) = (vf as u16, 256 - vf as u16);
-        let base = row * stride;
-        let fg = &fg[base..base + w];
-        let bg = &mut bg[base..base + w];
-        for (((b, &f), &a0), &a1) in bg.iter_mut().zip(fg).zip(&m0[..w]).zip(&m1[..w]) {
+        let fg = &fg[row * fg_stride + c0..row * fg_stride + c1];
+        let bg = &mut bg[row * stride + c0..row * stride + c1];
+        for (((b, &f), &a0), &a1) in bg.iter_mut().zip(fg).zip(&m0[c0..c1]).zip(&m1[c0..c1]) {
             let a = (u16::from(a0) * keep + u16::from(a1) * vf) >> 8;
             *b = ((u16::from(f) * a + u16::from(*b) * (255 - a)) / 255) as u8;
         }
@@ -905,23 +1088,30 @@ dispatch! {
 /// `2 * c` -- no second upscale, and the U and V bytes of a pixel share one
 /// mask value rather than sampling it twice. Taken as pairs of the band, the
 /// same stride as the pairs of chroma, so the compiler sees one regular walk.
-pub fn blend_chroma(fg: &[u8], bg: &mut [u8], up: &MaskUpscaler, w: usize, h: usize, stride: usize)
-    => blend_chroma_rows(fg, bg, up, w, h, stride);
+/// `fg_stride` and the span as for `blend_luma`.
+pub fn blend_chroma(fg: &[u8], fg_stride: usize, bg: &mut [u8], up: &MaskUpscaler, w: usize, h: usize,
+                    stride: usize)
+    => blend_chroma_rows(fg, fg_stride, bg, up, w, h, stride);
 }
 
 #[inline(always)]
-fn blend_chroma_rows(fg: &[u8], bg: &mut [u8], up: &MaskUpscaler, w: usize, h: usize, stride: usize) {
+fn blend_chroma_rows(fg: &[u8], fg_stride: usize, bg: &mut [u8], up: &MaskUpscaler, w: usize, h: usize,
+                     stride: usize) {
     for row in 0..h {
-        let (m0, m1, vf) = up.rows(row * 2, h * 2);
+        let (m0, m1, vf, c0, c1) = up.rows_span(row * 2, h * 2);
+        // Whole chroma samples: chroma column c reads band column 2c.
+        let (c0, c1) = ((c0 & !1).min(2 * w), ((c1 + 1) & !1).min(2 * w));
+        if c1 <= c0 {
+            continue;
+        }
         let (vf, keep) = (vf as u16, 256 - vf as u16);
-        let base = row * stride;
-        let fg = &fg[base..base + 2 * w];
-        let bg = &mut bg[base..base + 2 * w];
+        let fg = &fg[row * fg_stride + c0..row * fg_stride + c1];
+        let bg = &mut bg[row * stride + c0..row * stride + c1];
         for (((b, f), a0), a1) in bg
             .chunks_exact_mut(2)
             .zip(fg.chunks_exact(2))
-            .zip(m0[..2 * w].chunks_exact(2))
-            .zip(m1[..2 * w].chunks_exact(2))
+            .zip(m0[c0..c1].chunks_exact(2))
+            .zip(m1[c0..c1].chunks_exact(2))
         {
             let a = (u16::from(a0[0]) * keep + u16::from(a1[0]) * vf) >> 8;
             b[0] = ((u16::from(f[0]) * a + u16::from(b[0]) * (255 - a)) / 255) as u8;
@@ -1428,13 +1618,121 @@ mod tests {
             let (fg, bg) = (noise(11, w * h), noise(13, w * h));
             let (mut want, mut got) = (bg.clone(), bg.clone());
             reference_blend(&fg, &mut want, &up, w, h, w, false);
-            blend_luma(&fg, &mut got, &up, w, h, w);
+            blend_luma(&fg, w, &mut got, &up, w, h, w);
             assert_eq!(got, want, "luma, aimed {aim:?}");
 
             let (mut want, mut got) = (bg[..w * h / 2].to_vec(), bg[..w * h / 2].to_vec());
             reference_blend(&fg, &mut want, &up, w / 2, h / 2, w, true);
-            blend_chroma(&fg, &mut got, &up, w / 2, h / 2, w);
+            blend_chroma(&fg, w, &mut got, &up, w / 2, h / 2, w);
             assert_eq!(got, want, "chroma, aimed {aim:?}");
+        }
+    }
+
+    /// A mask with nobody in most of it, as a real one is: the spans have to
+    /// skip exactly the zeros and nothing else, through a framing crop moving
+    /// and a subject moving between frames, with the band cleared behind them.
+    #[test]
+    fn blending_a_sparse_mask_is_what_it_was() {
+        let (w, h) = (320usize, 180usize);
+        let blob = |cx: f32, cy: f32| -> Vec<f32> {
+            (0..NET * NET)
+                .map(|i| {
+                    let (x, y) = ((i % NET) as f32 - cx, (i / NET) as f32 - cy);
+                    (1.4 - (x * x + y * y) / 1600.0).clamp(0.0, 1.0)
+                })
+                .collect()
+        };
+        let mut up = MaskUpscaler::new(w, MaskSize::SQUARE);
+        let (fg, bg) = (noise(11, w * h), noise(13, w * h));
+        for (i, (cx, cy)) in [(60.0, 80.0), (200.0, 120.0), (128.0, 250.0), (-200.0, -200.0), (40.0, 20.0)]
+            .into_iter()
+            .enumerate()
+        {
+            if i == 2 {
+                up.aim(30.0, 160.0, 20.0, 150.0);
+            }
+            let mask = blob(cx, cy);
+            up.prepare(&mask);
+            // The dense reference sees the same band; check the band too, against a fresh upscaler.
+            let mut fresh = MaskUpscaler::new(w, MaskSize::SQUARE);
+            if i >= 2 {
+                fresh.aim(30.0, 160.0, 20.0, 150.0);
+            }
+            fresh.prepare(&mask);
+            assert!(up.band == fresh.band, "band left over from an earlier frame, step {i}");
+            let (mut want, mut got) = (bg.clone(), bg.clone());
+            reference_blend(&fg, &mut want, &up, w, h, w, false);
+            blend_luma(&fg, w, &mut got, &up, w, h, w);
+            assert_eq!(got, want, "luma, step {i}");
+            let (mut want, mut got) = (bg[..w * h / 2].to_vec(), bg[..w * h / 2].to_vec());
+            reference_blend(&fg, &mut want, &up, w / 2, h / 2, w, true);
+            blend_chroma(&fg, w, &mut got, &up, w / 2, h / 2, w);
+            assert_eq!(got, want, "chroma, step {i}");
+        }
+        assert!(!up.is_empty());
+        up.prepare(&vec![0.0; NET * NET]);
+        assert!(up.is_empty() && up.band.iter().all(|&v| v == 0));
+    }
+
+    /// The per-pixel model input the column table replaced.
+    fn reference_model_input(y_plane: &[u8], uv_plane: &[u8], width: usize, height: usize, y_stride: usize,
+                             uv_stride: usize, net: MaskSize, out: &mut [f32]) {
+        let (r_plane, rest) = out.split_at_mut(net.len());
+        let (g_plane, b_plane) = rest.split_at_mut(net.len());
+        for ny in 0..net.h {
+            let sy = ny * height / net.h;
+            for nx in 0..net.w {
+                let sx = nx * width / net.w;
+                let uv = (sy / 2) * uv_stride + (sx & !1);
+                let (r, g, b) = yuv_to_rgb(y_plane[sy * y_stride + sx], uv_plane[uv], uv_plane[uv + 1]);
+                let i = ny * net.w + nx;
+                r_plane[i] = r / 255.0;
+                g_plane[i] = g / 255.0;
+                b_plane[i] = b / 255.0;
+            }
+        }
+    }
+
+    #[test]
+    fn model_input_is_what_it_was() {
+        for (w, h, stride) in [(640usize, 360usize, 640usize), (1280, 720, 1344), (650, 480, 704)] {
+            let (y, uv) = (noise(21, stride * h), noise(23, stride * h / 2));
+            for net in [MaskSize::SQUARE, MaskSize { w: 512, h: 288 }] {
+                let (mut want, mut got) = (vec![0f32; 3 * net.len()], vec![0f32; 3 * net.len()]);
+                reference_model_input(&y, &uv, w, h, stride, stride, net, &mut want);
+                write_model_input(&y, &uv, w, h, stride, stride, net, &mut got);
+                assert!(want.iter().zip(&got).all(|(a, b)| a.to_bits() == b.to_bits()), "{w}x{h} into {net:?}");
+            }
+        }
+    }
+
+    /// Reading the sharp frame from another buffer, as the daemon does from the
+    /// camera's, must blur to the bytes blurring a copy of it in place does.
+    #[test]
+    fn blurring_from_a_source_matches_blurring_in_place() {
+        let (w, h) = (320usize, 180usize);
+        let (y0, uv0) = room(w, h);
+        let (sy, suv) = (w + 64, w + 64);
+        let mut ys = vec![0u8; sy * h];
+        let mut uvs = vec![0u8; suv * h / 2];
+        for row in 0..h {
+            ys[row * sy..][..w].copy_from_slice(&y0[row * w..][..w]);
+        }
+        for row in 0..h / 2 {
+            uvs[row * suv..][..w].copy_from_slice(&uv0[row * w..][..w]);
+        }
+        let mask: Vec<f32> = (0..NET * NET)
+            .map(|i| if (i % NET) > 100 && (i % NET) < 160 && i / NET > 60 { 1.0 } else { 0.0 })
+            .collect();
+        let mut up = MaskUpscaler::new(w, MaskSize::SQUARE);
+        up.prepare(&mask);
+        for r in [6, 20, 72] {
+            let (mut y, mut uv) = (y0.clone(), uv0.clone());
+            Blur::new(w, h).apply_filled(&mut y, &mut uv, w, h, w, w, r, 2, &mut crate::fill::Fill::new(), &up);
+            let (mut y2, mut uv2) = (vec![7u8; w * h], vec![7u8; w * h / 2]);
+            Blur::new(w, h).apply_filled_from((&ys, &uvs, sy, suv), &mut y2, &mut uv2, w, h, w, w, r, 2,
+                                              &mut crate::fill::Fill::new(), &up);
+            assert!(y == y2 && uv == uv2, "radius {r}");
         }
     }
 
@@ -1561,12 +1859,12 @@ mod tests {
         up.prepare(&mask);
         both("blend_luma", || {
             let mut bg = uv0.repeat(2);
-            blend_luma(&y0, &mut bg, &up, w, h, w);
+            blend_luma(&y0, w, &mut bg, &up, w, h, w);
             bg
         });
         both("blend_chroma", || {
             let mut bg = y0[..w * h / 2].to_vec();
-            blend_chroma(&uv0, &mut bg, &up, w / 2, h / 2, w);
+            blend_chroma(&uv0, w, &mut bg, &up, w / 2, h / 2, w);
             bg
         });
         both("write_model_input", || {
